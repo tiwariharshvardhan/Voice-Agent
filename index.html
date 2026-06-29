@@ -1,0 +1,1179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Voice Agent</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg:        #fdf6ec;
+      --bg2:       #fef9f3;
+      --surface:   #ffffff;
+      --border:    #ecdcc4;
+      --accent:    #d97706;
+      --accent-lt: #fde68a;
+      --accent-dk: #b45309;
+      --text:      #1c1008;
+      --text-2:    #7c5a2a;
+      --text-3:    #b08050;
+      --shadow:    rgba(180,100,20,0.10);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      overflow: hidden;
+    }
+
+    /* ── Header ────────────────────────────────────────── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px 28px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      box-shadow: 0 1px 8px var(--shadow);
+    }
+    .brand { display: flex; align-items: center; gap: 10px; }
+    .brand-dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 0 3px rgba(217,119,6,0.2);
+    }
+    .brand-dot.live { animation: dot-live 1.6s ease-in-out infinite; }
+    @keyframes dot-live {
+      0%,100% { box-shadow: 0 0 0 3px rgba(217,119,6,0.2); }
+      50%      { box-shadow: 0 0 0 7px rgba(217,119,6,0); }
+    }
+    header h1 { font-size: 1rem; font-weight: 600; color: var(--text); letter-spacing: -0.01em; }
+    header .subtitle { font-size: 0.75rem; color: var(--text-3); margin-top: 1px; }
+
+    #settings-btn {
+      width: 44px; height: 44px;
+      border-radius: 12px;
+      border: 1.5px solid var(--border);
+      background: var(--bg2);
+      color: var(--text-2);
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: all 0.15s;
+    }
+    #settings-btn:hover { background: var(--accent-lt); border-color: var(--accent); color: var(--accent-dk); }
+
+    /* ── Main ──────────────────────────────────────────── */
+    main {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      overflow: hidden;
+      padding: 0 20px;
+    }
+
+    /* Orb area */
+    #orb-section {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+      padding: 28px 0 20px;
+    }
+
+    #orb-ring {
+      position: relative;
+      width: 120px; height: 120px;
+    }
+    #orb {
+      width: 120px; height: 120px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 38% 32%, #f59e2a, #c47010 60%, #92480a);
+      box-shadow: 0 8px 32px rgba(196,112,16,0.35), 0 2px 8px rgba(196,112,16,0.2);
+      transition: transform 0.15s;
+      position: relative;
+      z-index: 1;
+    }
+    #orb::after {
+      content: '';
+      position: absolute;
+      top: 12%; left: 18%;
+      width: 35%; height: 22%;
+      background: rgba(255,255,255,0.22);
+      border-radius: 50%;
+      transform: rotate(-30deg);
+    }
+    #orb.listening { animation: orb-listen 2s ease-in-out infinite; }
+    #orb.speaking  {
+      animation: orb-speak 0.7s ease-in-out infinite;
+      background: radial-gradient(circle at 38% 32%, #4ade80, #16a34a 60%, #14532d);
+      box-shadow: 0 8px 32px rgba(22,163,74,0.4), 0 2px 8px rgba(22,163,74,0.2);
+    }
+    #orb.processing {
+      animation: orb-process 1.8s linear infinite;
+      background: radial-gradient(circle at 38% 32%, #fb923c, #ea580c 60%, #9a3412);
+      box-shadow: 0 8px 32px rgba(234,88,12,0.4);
+    }
+    @keyframes orb-listen {
+      0%,100% { box-shadow: 0 8px 32px rgba(196,112,16,0.35), 0 0 0 0 rgba(217,119,6,0.3); }
+      50%      { box-shadow: 0 8px 32px rgba(196,112,16,0.35), 0 0 0 16px rgba(217,119,6,0); }
+    }
+    @keyframes orb-speak {
+      0%,100% { transform: scale(1);    box-shadow: 0 8px 32px rgba(22,163,74,0.4), 0 0 0 0 rgba(22,163,74,0.3); }
+      50%     { transform: scale(1.06); box-shadow: 0 8px 32px rgba(22,163,74,0.4), 0 0 0 14px rgba(22,163,74,0); }
+    }
+    @keyframes orb-process {
+      0%   { filter: hue-rotate(0deg) brightness(1); }
+      50%  { filter: hue-rotate(20deg) brightness(1.1); }
+      100% { filter: hue-rotate(0deg) brightness(1); }
+    }
+
+    #status-label {
+      font-size: 0.82rem;
+      font-weight: 500;
+      color: var(--text-3);
+      letter-spacing: 0.03em;
+    }
+
+    #vol-bar-wrap {
+      width: 160px; height: 4px;
+      background: var(--border);
+      border-radius: 99px;
+      overflow: hidden;
+    }
+    #vol-bar {
+      height: 100%; width: 0%;
+      background: linear-gradient(90deg, var(--accent), #f59e0b);
+      border-radius: 99px;
+      transition: width 0.05s;
+    }
+
+    /* ── Transcript ────────────────────────────────────── */
+    #chat-wrap {
+      width: 100%;
+      max-width: 560px;
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 4px 0 16px;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
+    }
+    #chat-wrap::-webkit-scrollbar { width: 4px; }
+    #chat-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
+
+    .msg {
+      max-width: 78%;
+      padding: 10px 14px;
+      border-radius: 18px;
+      font-size: 0.88rem;
+      line-height: 1.55;
+      word-break: break-word;
+    }
+    .msg.user {
+      background: var(--accent);
+      color: #fff;
+      align-self: flex-end;
+      border-bottom-right-radius: 5px;
+      box-shadow: 0 2px 8px rgba(217,119,6,0.25);
+    }
+    .msg.agent {
+      background: var(--surface);
+      color: var(--text);
+      align-self: flex-start;
+      border-bottom-left-radius: 5px;
+      border: 1px solid var(--border);
+      box-shadow: 0 2px 8px var(--shadow);
+    }
+    .msg.error {
+      background: #fef2f2;
+      color: #b91c1c;
+      align-self: center;
+      border: 1px solid #fecaca;
+      font-size: 0.8rem;
+      border-radius: 10px;
+      padding: 8px 14px;
+    }
+
+    /* Empty state */
+    #empty-state {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      color: var(--text-3);
+      font-size: 0.85rem;
+      padding-bottom: 20px;
+    }
+    #empty-state .icon { font-size: 2rem; opacity: 0.4; }
+
+    /* ── Bottom bar ────────────────────────────────────── */
+    footer {
+      padding: 16px 28px 24px;
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: center;
+    }
+
+    #start-btn {
+      padding: 13px 40px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 14px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      letter-spacing: 0.01em;
+      box-shadow: 0 4px 14px rgba(217,119,6,0.35);
+      transition: all 0.15s;
+    }
+    #start-btn:hover { background: var(--accent-dk); transform: translateY(-1px); box-shadow: 0 6px 18px rgba(217,119,6,0.4); }
+    #start-btn:active { transform: translateY(0); }
+    #start-btn.hidden { display: none; }
+
+    #connected-bar {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.82rem;
+      color: var(--text-3);
+    }
+    #connected-bar.show { display: flex; }
+    #connected-bar .dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; }
+
+    /* ── About modal ───────────────────────────────────── */
+    #about-overlay {
+      display: none; position: fixed; inset: 0;
+      background: rgba(0,0,0,0.25);
+      backdrop-filter: blur(3px);
+      z-index: 110;
+      align-items: center; justify-content: center;
+      padding: 20px;
+    }
+    #about-overlay.open { display: flex; }
+
+    #about-modal {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      box-shadow: 0 24px 64px rgba(0,0,0,0.18);
+      width: 100%; max-width: 620px;
+      max-height: 88vh;
+      display: flex; flex-direction: column;
+      overflow: hidden;
+      animation: modal-in 0.22s ease;
+    }
+    @keyframes modal-in {
+      from { opacity: 0; transform: translateY(12px) scale(0.97); }
+      to   { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    .modal-header {
+      display: flex; align-items: center;
+      justify-content: space-between;
+      padding: 20px 24px 18px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg2);
+      flex-shrink: 0;
+    }
+    .modal-header-left { display: flex; align-items: center; gap: 10px; }
+    .modal-icon {
+      width: 36px; height: 36px; border-radius: 10px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-dk));
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1rem; color: #fff;
+    }
+    .modal-header h2 { font-size: 0.95rem; font-weight: 700; color: var(--text); }
+    .modal-header p  { font-size: 0.75rem; color: var(--text-3); margin-top: 1px; }
+    #close-about {
+      width: 30px; height: 30px; border: none; background: none;
+      border-radius: 8px; color: var(--text-3); font-size: 1rem;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      transition: all 0.15s;
+    }
+    #close-about:hover { background: var(--border); color: var(--text); }
+
+    .modal-body {
+      overflow-y: auto; padding: 24px;
+      display: flex; flex-direction: column; gap: 24px;
+      scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+    }
+
+    /* Section titles */
+    .section-title {
+      font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--text-3); margin-bottom: 10px;
+    }
+
+    /* Flow diagram */
+    .flow {
+      display: flex; align-items: center;
+      gap: 0; flex-wrap: nowrap;
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 14px; padding: 16px 20px;
+      overflow-x: auto;
+    }
+    .flow-step {
+      display: flex; flex-direction: column; align-items: center;
+      gap: 6px; flex-shrink: 0; min-width: 80px;
+    }
+    .flow-icon {
+      width: 44px; height: 44px; border-radius: 12px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.25rem;
+      box-shadow: 0 2px 8px var(--shadow);
+    }
+    .flow-icon.amber  { background: linear-gradient(135deg,#fef3c7,#fde68a); }
+    .flow-icon.orange { background: linear-gradient(135deg,#ffedd5,#fed7aa); }
+    .flow-icon.green  { background: linear-gradient(135deg,#dcfce7,#bbf7d0); }
+    .flow-icon.blue   { background: linear-gradient(135deg,#dbeafe,#bfdbfe); }
+    .flow-label { font-size: 0.72rem; font-weight: 600; color: var(--text-2); text-align: center; }
+    .flow-sub   { font-size: 0.65rem; color: var(--text-3); text-align: center; margin-top: -4px; }
+    .flow-arrow {
+      font-size: 1rem; color: var(--text-3);
+      margin: 0 4px; flex-shrink: 0; padding-bottom: 18px;
+    }
+
+    /* Model cards */
+    .model-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+    .model-card {
+      border: 1.5px solid var(--border); border-radius: 12px;
+      padding: 12px 14px; background: var(--bg2);
+      display: flex; flex-direction: column; gap: 4px;
+    }
+    .model-card .mc-role { font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-3); }
+    .model-card .mc-name { font-size: 0.85rem; font-weight: 700; color: var(--text); }
+    .model-card .mc-by   { font-size: 0.72rem; color: var(--text-3); }
+    .model-card .mc-badge{
+      display: inline-block; margin-top: 4px;
+      padding: 2px 8px; border-radius: 99px;
+      font-size: 0.65rem; font-weight: 600;
+      background: var(--accent-lt); color: var(--accent-dk);
+    }
+
+    /* Features list */
+    .feature-list { display: flex; flex-direction: column; gap: 8px; }
+    .feature-item {
+      display: flex; align-items: flex-start; gap: 10px;
+      padding: 10px 12px; border-radius: 10px;
+      background: var(--bg); border: 1px solid var(--border);
+    }
+    .feature-icon { font-size: 1rem; flex-shrink: 0; margin-top: 1px; }
+    .feature-text .ft { font-size: 0.84rem; font-weight: 600; color: var(--text); }
+    .feature-text .fd { font-size: 0.77rem; color: var(--text-3); margin-top: 1px; line-height: 1.4; }
+
+    /* Stack pills */
+    .stack-row { display: flex; flex-wrap: wrap; gap: 8px; }
+    .stack-pill {
+      padding: 5px 12px; border-radius: 99px;
+      border: 1.5px solid var(--border);
+      font-size: 0.78rem; font-weight: 500; color: var(--text-2);
+      background: var(--bg2);
+    }
+
+    /* ── Settings overlay + panel ──────────────────────── */
+    #settings-overlay {
+      display: none;
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.18);
+      backdrop-filter: blur(2px);
+      z-index: 99;
+    }
+    #settings-overlay.open { display: block; }
+
+    #settings-panel {
+      position: fixed;
+      top: 0; right: -440px;
+      width: 400px; max-width: 96vw;
+      height: 100vh;
+      background: var(--surface);
+      border-left: 1px solid var(--border);
+      box-shadow: -8px 0 32px var(--shadow);
+      display: flex; flex-direction: column;
+      transition: right 0.28s cubic-bezier(0.4,0,0.2,1);
+      z-index: 100;
+      overflow: hidden;
+    }
+    #settings-panel.open { right: 0; }
+
+    .panel-header {
+      display: flex; align-items: center;
+      justify-content: space-between;
+      padding: 20px 24px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg2);
+    }
+    .panel-header h2 { font-size: 0.95rem; font-weight: 600; color: var(--text); }
+    #close-settings {
+      width: 30px; height: 30px;
+      border: none; background: none;
+      border-radius: 8px;
+      color: var(--text-3); font-size: 1rem;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      transition: all 0.15s;
+    }
+    #close-settings:hover { background: var(--border); color: var(--text); }
+
+    .panel-body { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 22px; }
+
+    .field { display: flex; flex-direction: column; gap: 6px; }
+    .field-label {
+      font-size: 0.75rem; font-weight: 600;
+      color: var(--text-2); text-transform: uppercase; letter-spacing: 0.06em;
+    }
+    .field select, .field input[type="text"], .field textarea {
+      border: 1.5px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-family: inherit;
+      font-size: 0.88rem;
+      background: var(--bg2);
+      color: var(--text);
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+      width: 100%;
+    }
+    .field select:focus, .field input[type="text"]:focus, .field textarea:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(217,119,6,0.12);
+    }
+    .field textarea { resize: vertical; min-height: 130px; line-height: 1.55; }
+    .field-hint { font-size: 0.75rem; color: var(--text-3); line-height: 1.4; }
+    #custom-voice-wrap { display: none; margin-top: 8px; }
+
+    .panel-footer {
+      padding: 16px 24px 24px;
+      border-top: 1px solid var(--border);
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    #apply-btn {
+      padding: 12px;
+      background: var(--accent);
+      color: #fff;
+      border: none; border-radius: 10px;
+      font-family: inherit;
+      font-size: 0.9rem; font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+      box-shadow: 0 2px 8px rgba(217,119,6,0.3);
+    }
+    #apply-btn:hover { background: var(--accent-dk); }
+    #apply-status { text-align: center; font-size: 0.8rem; color: #16a34a; min-height: 16px; }
+  </style>
+</head>
+<body>
+
+<!-- Settings -->
+<div id="settings-overlay"></div>
+<div id="settings-panel">
+  <div class="panel-header">
+    <h2>Agent Settings</h2>
+    <button id="close-settings">✕</button>
+  </div>
+  <div class="panel-body">
+    <div class="field">
+      <div class="field-label">Voice</div>
+      <select id="voice-select">
+        <option value="JBFqnCBsd6RMkjVDRZzb">George (Default)</option>
+        <option value="21m00Tcm4TlvDq8ikWAM">Rachel</option>
+        <option value="AZnzlk1XvdvUeBnXmlld">Domi</option>
+        <option value="EXAVITQu4vr4xnSDxMaL">Bella</option>
+        <option value="ErXwobaYiN019PkySvjV">Antoni</option>
+        <option value="VR6AewLTigWG4xSOukaG">Arnold</option>
+        <option value="pNInz6obpgDQGcFmaJgB">Adam</option>
+        <option value="custom">Custom Voice ID…</option>
+      </select>
+      <div id="custom-voice-wrap">
+        <input type="text" id="custom-voice-input" placeholder="Paste ElevenLabs Voice ID"/>
+        <div class="field-hint" style="margin-top:5px">Find it on elevenlabs.io → Voices → your voice</div>
+      </div>
+    </div>
+
+    <div class="field">
+      <div class="field-label">Agent Persona</div>
+      <select id="prompt-select">
+        <option value="general">General Assistant (Default)</option>
+        <option value="ecommerce">E-commerce Support — ShopEase</option>
+        <option value="healthcare">Healthcare Assistant — CareFirst</option>
+        <option value="banking">Banking Support — SecureBank</option>
+        <option value="travel">Travel Concierge — TravelNest</option>
+        <option value="food">Food Delivery — QuickBite</option>
+        <option value="custom">Custom — write your own</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <div class="field-label">System Prompt</div>
+      <textarea id="system-prompt">You are a helpful and friendly voice assistant. Keep replies short and conversational — 1 to 3 sentences max. Respond in the same language the user speaks.</textarea>
+      <div class="field-hint">Select a persona above to auto-fill, or write your own below.</div>
+    </div>
+  </div>
+  <div class="panel-footer">
+    <button id="apply-btn">Apply Settings</button>
+    <div id="apply-status"></div>
+  </div>
+</div>
+
+<!-- App -->
+<!-- About modal -->
+<div id="about-overlay">
+  <div id="about-modal">
+    <div class="modal-header">
+      <div class="modal-header-left">
+        <div class="modal-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M9 11V7a3 3 0 0 1 6 0v4"/><circle cx="9" cy="16" r="1" fill="currentColor"/><circle cx="15" cy="16" r="1" fill="currentColor"/></svg>
+        </div>
+        <div>
+          <h2>About this Agent</h2>
+          <p>Architecture, models & features</p>
+        </div>
+      </div>
+      <button id="close-about">✕</button>
+    </div>
+    <div class="modal-body">
+
+      <!-- Overview -->
+      <div>
+        <div class="section-title">What is this?</div>
+        <p style="font-size:0.88rem;color:var(--text-2);line-height:1.65">
+          A fully real-time, browser-based voice agent. You speak — it listens, thinks, and talks back.
+          No button to hold. Voice Activity Detection (VAD) automatically detects when you start and stop speaking.
+          Audio is processed through a concurrent async streaming pipeline — the LLM and TTS run in parallel,
+          so you hear the first sentence while the rest is still being generated.
+        </p>
+      </div>
+
+      <!-- Flow -->
+      <div>
+        <div class="section-title">How it flows</div>
+        <div class="flow">
+          <div class="flow-step">
+            <div class="flow-icon amber">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+            </div>
+            <div class="flow-label">You Speak</div>
+            <div class="flow-sub">Browser mic</div>
+          </div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-step">
+            <div class="flow-icon orange">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+            </div>
+            <div class="flow-label">STT</div>
+            <div class="flow-sub">Saaras v3</div>
+          </div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-step">
+            <div class="flow-icon blue">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>
+            </div>
+            <div class="flow-label">LLM</div>
+            <div class="flow-sub">Llama 3.3</div>
+          </div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-step">
+            <div class="flow-icon green">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+            </div>
+            <div class="flow-label">TTS</div>
+            <div class="flow-sub">ElevenLabs</div>
+          </div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-step">
+            <div class="flow-icon amber">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3z"/><path d="M3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg>
+            </div>
+            <div class="flow-label">You Hear</div>
+            <div class="flow-sub">Browser speaker</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Models -->
+      <div>
+        <div class="section-title">Models Used</div>
+        <div class="model-grid">
+          <div class="model-card">
+            <div class="mc-role">Speech-to-Text</div>
+            <div class="mc-name">Saaras v3</div>
+            <div class="mc-by">by Sarvam AI</div>
+            <div class="mc-badge">Hindi + English</div>
+          </div>
+          <div class="model-card">
+            <div class="mc-role">Language Model</div>
+            <div class="mc-name">Llama 3.3 70B</div>
+            <div class="mc-by">by Groq</div>
+            <div class="mc-badge">Streaming tokens</div>
+          </div>
+          <div class="model-card">
+            <div class="mc-role">Text-to-Speech</div>
+            <div class="mc-name">Flash v2.5</div>
+            <div class="mc-by">by ElevenLabs</div>
+            <div class="mc-badge">Per-sentence stream</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Features -->
+      <div>
+        <div class="section-title">Features</div>
+        <div class="feature-list">
+          <div class="feature-item">
+            <div class="feature-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+            </div>
+            <div class="feature-text">
+              <div class="ft">Auto Voice Activity Detection (VAD)</div>
+              <div class="fd">No button to hold — detects when you start and stop speaking using real-time frequency analysis in the 300–3400 Hz speech band.</div>
+            </div>
+          </div>
+          <div class="feature-item">
+            <div class="feature-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+            </div>
+            <div class="feature-text">
+              <div class="ft">Concurrent Streaming Pipeline</div>
+              <div class="fd">LLM streams tokens sentence-by-sentence into a queue. TTS consumes each sentence in parallel — you hear the first sentence while the rest is still being generated.</div>
+            </div>
+          </div>
+          <div class="feature-item">
+            <div class="feature-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+            </div>
+            <div class="feature-text">
+              <div class="ft">Gapless Audio Playback</div>
+              <div class="fd">Uses Web Audio API to decode and schedule each sentence's audio buffer precisely back-to-back — no clicks or silence between sentences.</div>
+            </div>
+          </div>
+          <div class="feature-item">
+            <div class="feature-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            </div>
+            <div class="feature-text">
+              <div class="ft">Live Transcript</div>
+              <div class="fd">Every exchange is shown in a chat UI — both your words and the agent's response appear in real-time.</div>
+            </div>
+          </div>
+          <div class="feature-item">
+            <div class="feature-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+            </div>
+            <div class="feature-text">
+              <div class="ft">Conversation Memory</div>
+              <div class="fd">Full conversation history is maintained in-session, so the agent understands context across multiple turns.</div>
+            </div>
+          </div>
+          <div class="feature-item">
+            <div class="feature-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            </div>
+            <div class="feature-text">
+              <div class="ft">Customizable Agent</div>
+              <div class="fd">Change voice (ElevenLabs voice ID) and personality (system prompt) live from the Settings panel — no restart needed.</div>
+            </div>
+          </div>
+          <div class="feature-item">
+            <div class="feature-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+            </div>
+            <div class="feature-text">
+              <div class="ft">Multilingual</div>
+              <div class="fd">Saaras v3 supports Hindi, English, and code-switched Hinglish. The LLM responds in the same language you speak.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tech stack -->
+      <div>
+        <div class="section-title">Tech Stack</div>
+        <div class="stack-row">
+          <div class="stack-pill">Python 3</div>
+          <div class="stack-pill">FastAPI</div>
+          <div class="stack-pill">asyncio</div>
+          <div class="stack-pill">WebSockets</div>
+          <div class="stack-pill">Sarvam AI</div>
+          <div class="stack-pill">Groq</div>
+          <div class="stack-pill">ElevenLabs</div>
+          <div class="stack-pill">Web Audio API</div>
+          <div class="stack-pill">MediaRecorder API</div>
+          <div class="stack-pill">VAD (custom)</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<header>
+  <div class="brand">
+    <div class="brand-dot" id="brand-dot"></div>
+    <div>
+      <h1>Voice Agent</h1>
+      <div class="subtitle" id="header-sub">Ready to start</div>
+    </div>
+  </div>
+  <div style="display:flex;gap:8px;align-items:center">
+    <button id="about-btn" title="About this agent" style="
+      padding: 0 14px; height: 36px; border-radius: 10px;
+      border: 1.5px solid var(--border); background: var(--bg2);
+      color: var(--text-2); font-family: inherit;
+      font-size: 0.8rem; font-weight: 600; cursor: pointer;
+      display: flex; align-items: center; gap: 6px;
+      transition: all 0.15s;
+    " onmouseover="this.style.background='#fef3c7';this.style.borderColor='var(--accent)'"
+       onmouseout="this.style.background='var(--bg2)';this.style.borderColor='var(--border)'">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg> About
+    </button>
+    <button id="settings-btn" title="Settings">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    </button>
+  </div>
+</header>
+
+<main>
+  <div id="orb-section">
+    <div id="orb-ring">
+      <div id="orb"></div>
+    </div>
+    <div id="status-label">Click Start below</div>
+    <div id="vol-bar-wrap"><div id="vol-bar"></div></div>
+  </div>
+
+  <div id="chat-wrap">
+    <div id="empty-state">
+      <div class="icon">🎙</div>
+      <div>Start talking to begin a conversation</div>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <button id="start-btn">Start Talking</button>
+  <div id="connected-bar">
+    <div class="dot"></div>
+    <span id="connected-label">Listening…</span>
+  </div>
+</footer>
+
+<script>
+const SILENCE_THRESHOLD = 0.010;
+const SILENCE_DELAY_MS  = 2200;
+const MIN_SPEECH_MS     = 400;
+const MAX_SPEECH_MS     = 18000;
+
+let ws, audioCtx, analyser, mediaStream, mediaRecorder;
+let chunks = [], isSpeaking = false, isAgentSpeaking = false;
+let silenceTimer = null, speechStart = null, animFrame = null, currentAudio = null;
+let dynamicThreshold = SILENCE_THRESHOLD, maxSpeechTimer = null;
+let ttsStreamComplete = false, scheduledEndTime = 0, pendingBuffers = 0;
+
+// DOM
+const orb           = document.getElementById("orb");
+const brandDot      = document.getElementById("brand-dot");
+const statusLabel   = document.getElementById("status-label");
+const headerSub     = document.getElementById("header-sub");
+const volBar        = document.getElementById("vol-bar");
+const startBtn      = document.getElementById("start-btn");
+const connectedBar  = document.getElementById("connected-bar");
+const connLabel     = document.getElementById("connected-label");
+const chatWrap      = document.getElementById("chat-wrap");
+const emptyState    = document.getElementById("empty-state");
+const settingsBtn   = document.getElementById("settings-btn");
+const settingsPanel = document.getElementById("settings-panel");
+const overlay       = document.getElementById("settings-overlay");
+const closeBtn      = document.getElementById("close-settings");
+const voiceSelect   = document.getElementById("voice-select");
+const customWrap    = document.getElementById("custom-voice-wrap");
+const customInput   = document.getElementById("custom-voice-input");
+const systemPrompt  = document.getElementById("system-prompt");
+const promptSelect  = document.getElementById("prompt-select");
+const applyBtn      = document.getElementById("apply-btn");
+const applyStatus   = document.getElementById("apply-status");
+
+// ── Preset prompts ────────────────────────────────────────
+const PRESET_PROMPTS = {
+  general: `You are a helpful and friendly voice assistant. Keep replies short and conversational — 1 to 3 sentences max. Respond in the same language the user speaks.`,
+
+  ecommerce: `You are Aria, a senior customer support specialist for ShopEase, India's leading e-commerce platform. You assist customers with orders, deliveries, returns, refunds, and account issues via voice.
+
+TONE: Warm, empathetic, and solution-first. Acknowledge frustration before jumping to fixes. Keep each response to 2–3 spoken sentences — this is a voice call, not a chat. Respond in whatever language the customer uses (Hindi, English, or Hinglish).
+
+WHAT YOU HANDLE:
+- Order status and delivery tracking
+- Return and exchange requests (eligible within 7 days of delivery)
+- Refund timelines: 3–5 business days for UPI/cards, 7–10 for bank transfers
+- Order cancellation (only possible before dispatch)
+- Wrong or damaged item resolution — always offer replacement or full refund, no questions asked
+- Account, payment, and promo code issues
+
+RULES:
+- Always ask for order ID or registered mobile number before pulling up any details
+- Never promise refund timelines shorter than policy allows
+- For fraud or account compromise: escalate immediately — "I'm flagging your account for urgent review right now"
+- Never ask for or accept OTP, CVV, or full card number under any circumstance
+- If beyond your scope: "I'm connecting you to our specialist team — expect a callback within 2 hours"
+
+Start by greeting the customer and asking how you can help them today.`,
+
+  healthcare: `You are MedAssist, a patient-facing AI assistant for CareFirst Clinics — a multi-specialty healthcare network. You help patients with appointments, clinic information, and general health guidance over voice.
+
+TONE: Calm, compassionate, and reassuring. Never clinical or cold. Keep responses to 2–3 sentences — voice format. Respond in the patient's language.
+
+WHAT YOU HANDLE:
+- Booking, rescheduling, and cancelling appointments across departments: General Medicine, Cardiology, Dermatology, Orthopedics, Pediatrics, Gynecology, Neurology
+- Doctor availability, clinic timings, and location guidance
+- Pre-appointment instructions (fasting requirements, documents to carry, what to expect)
+- General wellness and lifestyle questions
+- Prescription refill routing to the concerned doctor
+- Explaining diagnostic test procedures in simple terms
+
+ABSOLUTE RULES — NON-NEGOTIABLE:
+- NEVER diagnose any medical condition, even if symptoms seem obvious
+- NEVER recommend specific medications, dosages, or treatments
+- For any emergency symptom — chest pain, breathlessness, sudden weakness, stroke signs, severe bleeding — immediately say: "Please call 112 or go to the nearest emergency room right now. Do not wait."
+- For mental health distress: always provide iCall helpline — 9152987821
+- Always end medical advice questions with: "Please consult your doctor for a proper evaluation"
+
+Start by warmly greeting the patient and asking what you can help them with.`,
+
+  banking: `You are Finley, a virtual banking assistant for SecureBank. You help customers with account services, transactions, card management, and financial product queries over a voice call.
+
+TONE: Professional, precise, and trustworthy. For fraud or financial distress — switch to urgent, empathetic mode immediately. Keep responses to 2–3 spoken sentences. Respond in the customer's preferred language.
+
+WHAT YOU HANDLE:
+- Account balance, mini-statement (last 5 transactions), and account details
+- Fund transfer status — NEFT, RTGS, IMPS, UPI
+- Credit and debit card blocking, unblocking, limit changes, and PIN reset requests
+- EMI schedules, loan outstanding balances, and foreclosure queries
+- Fixed Deposit and Recurring Deposit — interest rates, maturity dates, premature withdrawal
+- Cheque status and stop-cheque requests
+- Branch and ATM locator
+- Service request registration and complaint tracking
+
+SECURITY RULES — ABSOLUTE:
+- Verify identity ONLY using: registered mobile number + date of birth. Nothing else.
+- NEVER ask for full card number, CVV, ATM PIN, or OTP — not even to "verify identity"
+- If a customer reports an unauthorized transaction: "Block your card immediately by pressing 1, and I'm registering a fraud complaint right now — your reference number will arrive by SMS"
+- Always remind customers: "SecureBank will never call asking for your OTP, PIN, or card details"
+- For fraud cases: treat as highest priority — give complaint reference number and escalation timeline
+
+Start by greeting the customer formally and asking how you may assist them today.`,
+
+  travel: `You are Voyager, a premium AI travel concierge for TravelNest — a full-service travel platform offering flights, hotels, and curated holiday packages across India and internationally.
+
+TONE: Enthusiastic, knowledgeable, and helpful. Make travel sound exciting when discussing destinations. Switch to calm and solution-focused when handling complaints. Keep voice responses to 2–4 sentences — be specific with numbers and facts. Respond in the traveler's language.
+
+WHAT YOU HANDLE:
+- Flight queries — domestic and international, baggage allowance, check-in procedures, seat selection
+- Hotel bookings — room types, amenities, check-in/check-out times, special requests
+- Holiday packages — recommendations based on budget, duration, group size, and interests
+- Visa requirements and documentation guidance for top destinations
+- Travel insurance — coverage types and recommendations
+- Cancellation and refund policies — always explain before confirming bookings
+- Airport transfers, cab bookings, and local logistics
+- Travel advisories, weather info, and destination highlights
+
+PROACTIVE HANDLING:
+- Flight delays or cancellations: check rebooking options first, then meal/hotel voucher eligibility
+- Hotel issues (cleanliness, amenities, service): offer room upgrade or partner property transfer without hesitation
+- International travel: proactively mention visa lead times, travel insurance, and forex requirements
+- Group bookings (5+ travelers): route to dedicated group travel desk for better rates
+- Budget travelers: always mention the best value option alongside the premium one
+
+Start by warmly welcoming the traveler and asking where they'd like to go or how you can improve their journey.`,
+
+  food: `You are Zara, a customer support agent for QuickBite — a fast food delivery platform connecting customers with 10,000+ restaurants across India.
+
+TONE: Friendly, upbeat, and fast. Customers are hungry — every second counts. Lead with the solution, then explain briefly. Keep it to 1–2 punchy sentences per turn. Use casual but professional language. Respond in whatever language or mix (including Hinglish) the customer uses.
+
+WHAT YOU HANDLE:
+- Live order tracking and delivery ETA updates
+- Order modification requests (possible only before restaurant confirms)
+- Missing item, wrong order, or bad quality — full refund or redelivery, no interrogation
+- Late delivery beyond promised time — proactively offer delivery fee waiver or QuickBite credits
+- Payment failure — check debit status; if debited, initiate refund within 24 hours
+- Promo code, cashback, and offer issues
+- Restaurant queries and rating disputes
+- Account, address, and payment method management
+
+RESOLUTION RULES:
+- Missing or wrong items: "I'm processing a full refund / redelivery right now — done in 2 minutes"
+- Quality complaint (cold food, tampered packaging): full refund + flag restaurant — no exceptions
+- Delivery cancelled by partner: re-assign immediately or offer priority reorder with discount
+- Rude delivery partner: register complaint, offer 50 QuickBite credits as goodwill
+- Never make the customer repeat their order details more than once — check the system first
+
+Start by greeting the customer and asking what's happening — keep it quick and friendly.`
+};
+
+// ── About modal ───────────────────────────────────────────
+const aboutOverlay = document.getElementById("about-overlay");
+const closeAbout   = document.getElementById("close-about");
+document.getElementById("about-btn").addEventListener("click", () => aboutOverlay.classList.add("open"));
+closeAbout.addEventListener("click", () => aboutOverlay.classList.remove("open"));
+aboutOverlay.addEventListener("click", e => { if (e.target === aboutOverlay) aboutOverlay.classList.remove("open"); });
+
+// ── Settings panel ────────────────────────────────────────
+settingsBtn.addEventListener("click", () => { settingsPanel.classList.add("open"); overlay.classList.add("open"); });
+closeBtn.addEventListener("click", closeSettings);
+overlay.addEventListener("click", closeSettings);
+function closeSettings() { settingsPanel.classList.remove("open"); overlay.classList.remove("open"); }
+
+voiceSelect.addEventListener("change", () => {
+  customWrap.style.display = voiceSelect.value === "custom" ? "block" : "none";
+});
+
+promptSelect.addEventListener("change", () => {
+  const key = promptSelect.value;
+  if (key === "custom") { systemPrompt.focus(); return; }
+  systemPrompt.value = PRESET_PROMPTS[key];
+});
+
+systemPrompt.addEventListener("input", () => {
+  promptSelect.value = "custom";
+});
+
+applyBtn.addEventListener("click", () => {
+  const voiceId = voiceSelect.value === "custom" ? customInput.value.trim() : voiceSelect.value;
+  const prompt  = systemPrompt.value.trim();
+  if (!voiceId) { showApplyStatus("Voice ID is empty", "error"); return; }
+  if (!prompt)  { showApplyStatus("System prompt is empty", "error"); return; }
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "settings", voice_id: voiceId, system_prompt: prompt }));
+    showApplyStatus("Settings applied!", "ok");
+    setTimeout(closeSettings, 1200);
+  } else {
+    showApplyStatus("Start the agent first", "error");
+  }
+});
+function showApplyStatus(msg, type) {
+  applyStatus.textContent = msg;
+  applyStatus.style.color = type === "ok" ? "#16a34a" : "#b91c1c";
+  setTimeout(() => { applyStatus.textContent = ""; }, 2000);
+}
+
+// ── UI helpers ─────────────────────────────────────────────
+function setStatus(state, text, sub) {
+  orb.className = state;
+  statusLabel.textContent = text;
+  if (sub) headerSub.textContent = sub;
+  if (state === "listening") { brandDot.classList.add("live"); connLabel.textContent = "Listening…"; }
+  else if (state === "speaking")   connLabel.textContent = "Agent speaking…";
+  else if (state === "processing") connLabel.textContent = "Processing…";
+}
+function addMsg(role, text) {
+  if (emptyState.parentNode) emptyState.remove();
+  const d = document.createElement("div");
+  d.className = "msg " + role;
+  d.textContent = text;
+  chatWrap.appendChild(d);
+  chatWrap.scrollTop = chatWrap.scrollHeight;
+}
+
+// ── WebSocket ─────────────────────────────────────────────
+function connectWS() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.onopen = () => {
+    startBtn.classList.add("hidden");
+    connectedBar.classList.add("show");
+    brandDot.classList.add("live");
+    headerSub.textContent = "Connected";
+    startListening();
+  };
+  ws.onclose = () => {
+    setStatus("", "Disconnected");
+    headerSub.textContent = "Disconnected — refresh to reconnect";
+    brandDot.classList.remove("live");
+    connectedBar.classList.remove("show");
+  };
+  ws.onmessage = async (event) => {
+    if (event.data instanceof Blob) { enqueueAudio(event.data); return; }
+    const msg = JSON.parse(event.data);
+    if      (msg.type === "user_transcript")  { addMsg("user",  msg.text); setStatus("processing", "Thinking…",  "Processing"); }
+    else if (msg.type === "agent_transcript") { addMsg("agent", msg.text); }
+    else if (msg.type === "tts_end")          { handleTtsEnd(); }
+    else if (msg.type === "tts_fallback")     { speakWithBrowser(msg.text); }
+    else if (msg.type === "error")            { addMsg("error", msg.text); resumeListening(); }
+    else if (msg.type === "ready")            { resumeListening(); }
+  };
+}
+
+// ── Mic & VAD ─────────────────────────────────────────────
+function getSpeechRMS(data) {
+  const binHz = audioCtx.sampleRate / analyser.fftSize;
+  const lo = Math.max(1, Math.floor(300 / binHz));
+  const hi = Math.min(data.length - 1, Math.floor(3400 / binHz));
+  const slice = data.slice(lo, hi + 1);
+  return Math.sqrt(slice.reduce((s, v) => s + v * v, 0) / slice.length) / 255;
+}
+
+async function calibrateNoiseFloor() {
+  return new Promise(resolve => {
+    const buf = new Uint8Array(analyser.frequencyBinCount);
+    let frames = 0, sum = 0;
+    function tick() {
+      analyser.getByteFrequencyData(buf);
+      sum += getSpeechRMS(buf);
+      if (++frames < 50) requestAnimationFrame(tick);
+      else resolve(Math.max((sum / frames) * 1.8, SILENCE_THRESHOLD));
+    }
+    requestAnimationFrame(tick);
+  });
+}
+
+async function startListening() {
+  try { mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); }
+  catch (e) { setStatus("", "Mic denied: " + e.message); return; }
+  audioCtx = new AudioContext();
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 512;
+  audioCtx.createMediaStreamSource(mediaStream).connect(analyser);
+  setStatus("listening", "Calibrating mic…", "Calibrating…");
+  dynamicThreshold = await calibrateNoiseFloor();
+  console.log("Noise threshold set to:", dynamicThreshold.toFixed(4));
+  resumeListening();
+}
+function resumeListening() {
+  if (isAgentSpeaking) return;
+  ttsStreamComplete = false;
+  scheduledEndTime = 0;
+  pendingBuffers = 0;
+  setStatus("listening", "Listening…", "Listening");
+  isSpeaking = false; chunks = []; silenceTimer = null; speechStart = null;
+  clearTimeout(maxSpeechTimer); maxSpeechTimer = null;
+  startRecorder(); vadLoop();
+}
+function getSupportedMimeType() {
+  for (const t of ["audio/mp4","audio/webm;codecs=pcm","audio/webm","audio/ogg"])
+    if (MediaRecorder.isTypeSupported(t)) return t;
+  return "";
+}
+function startRecorder() {
+  if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+  chunks = [];
+  const mt = getSupportedMimeType();
+  mediaRecorder = new MediaRecorder(mediaStream, mt ? { mimeType: mt } : {});
+  window._recMime = mediaRecorder.mimeType;
+  mediaRecorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+  mediaRecorder.start(100);
+}
+function vadLoop() {
+  cancelAnimationFrame(animFrame);
+  const data = new Uint8Array(analyser.frequencyBinCount);
+  function tick() {
+    if (isAgentSpeaking) return;
+    analyser.getByteFrequencyData(data);
+    const fullRms = Math.sqrt(data.reduce((s,v) => s+v*v, 0) / data.length) / 255;
+    volBar.style.width = Math.min(fullRms * 500, 100) + "%";
+    const rms = getSpeechRMS(data);
+    if (rms > dynamicThreshold) {
+      if (!isSpeaking) {
+        isSpeaking = true; speechStart = Date.now();
+        clearTimeout(silenceTimer); silenceTimer = null;
+        clearTimeout(maxSpeechTimer);
+        maxSpeechTimer = setTimeout(() => { if (isSpeaking) sendAudio(); }, MAX_SPEECH_MS);
+      }
+    } else if (isSpeaking && !silenceTimer) {
+      silenceTimer = setTimeout(() => {
+        clearTimeout(maxSpeechTimer); maxSpeechTimer = null;
+        if (Date.now() - speechStart >= MIN_SPEECH_MS) sendAudio();
+        else { isSpeaking = false; speechStart = null; silenceTimer = null; }
+      }, SILENCE_DELAY_MS);
+    }
+    animFrame = requestAnimationFrame(tick);
+  }
+  animFrame = requestAnimationFrame(tick);
+}
+function sendAudio() {
+  cancelAnimationFrame(animFrame);
+  mediaRecorder.stop();
+  mediaRecorder.onstop = async () => {
+    const mime = window._recMime || "audio/webm";
+    const blob = new Blob(chunks, { type: mime });
+    if (blob.size < 1000) { resumeListening(); return; }
+    ws.send(JSON.stringify({ type: "audio_mime", mime }));
+    setStatus("processing", "Processing…", "Processing");
+    ws.send(await blob.arrayBuffer());
+  };
+}
+
+// ── Browser TTS fallback ──────────────────────────────────
+function speakWithBrowser(text) {
+  isAgentSpeaking = true;
+  cancelAnimationFrame(animFrame);
+  volBar.style.width = "0%";
+  const utt = new SpeechSynthesisUtterance(text);
+  utt.lang = "hi-IN";
+  utt.rate = 1.05;
+  utt.onend = () => { isAgentSpeaking = false; resumeListening(); };
+  utt.onerror = () => { isAgentSpeaking = false; resumeListening(); };
+  speechSynthesis.cancel();
+  speechSynthesis.speak(utt);
+}
+
+// ── Playback (Web Audio API — gapless scheduling) ─────────
+async function enqueueAudio(blob) {
+  if (!isAgentSpeaking) {
+    isAgentSpeaking = true;
+    cancelAnimationFrame(animFrame);
+    volBar.style.width = "0%";
+    setStatus("speaking", "Speaking…", "Agent speaking");
+  }
+  pendingBuffers++;
+  try {
+    if (audioCtx.state === "suspended") await audioCtx.resume();
+    const arrayBuffer = await blob.arrayBuffer();
+    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+    const source = audioCtx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(audioCtx.destination);
+    const startAt = Math.max(audioCtx.currentTime + 0.02, scheduledEndTime);
+    source.start(startAt);
+    scheduledEndTime = startAt + audioBuffer.duration;
+    source.onended = () => {
+      pendingBuffers--;
+      if (pendingBuffers === 0 && ttsStreamComplete) {
+        isAgentSpeaking = false;
+        resumeListening();
+      }
+    };
+  } catch (e) {
+    console.error("Audio decode error:", e);
+    pendingBuffers--;
+    if (pendingBuffers === 0 && ttsStreamComplete) {
+      isAgentSpeaking = false;
+      resumeListening();
+    }
+  }
+}
+function handleTtsEnd() {
+  ttsStreamComplete = true;
+  if (pendingBuffers === 0) {
+    isAgentSpeaking = false;
+    resumeListening();
+  }
+}
+
+// ── Start ─────────────────────────────────────────────────
+startBtn.addEventListener("click", () => {
+  headerSub.textContent = "Connecting…";
+  connectWS();
+});
+</script>
+</body>
+</html>
