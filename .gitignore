@@ -1,3 +1,4 @@
 .env
 __pycache__/
 voice-sandwich-demo/
+.DS_Store
