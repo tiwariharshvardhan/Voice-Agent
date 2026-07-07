@@ -58,9 +58,10 @@ async def websocket_endpoint(ws: WebSocket):
     print("Client connected")
 
     conversation_history = [{"role": "system", "content": SYSTEM_PROMPT}]
-    audio_mime   = "audio/webm"
-    voice_id     = ELEVENLABS_VOICE_ID
+    audio_mime    = "audio/webm"
+    voice_id      = ELEVENLABS_VOICE_ID
     system_prompt = SYSTEM_PROMPT
+    language_code = "unknown"
 
     try:
         while True:
@@ -76,8 +77,9 @@ async def websocket_endpoint(ws: WebSocket):
                 elif data.get("type") == "settings":
                     voice_id      = data.get("voice_id", voice_id)
                     system_prompt = data.get("system_prompt", system_prompt)
+                    language_code = data.get("language_code", language_code)
                     conversation_history = [{"role": "system", "content": system_prompt}]
-                    print(f"Settings updated — voice: {voice_id}")
+                    print(f"Settings updated — voice: {voice_id}, lang: {language_code}")
                     print(f"System prompt: {system_prompt[:80]}...")
                     await ws.send_json({"type": "settings_ack"})
 
@@ -90,7 +92,7 @@ async def websocket_endpoint(ws: WebSocket):
             print(f"Audio received: {len(audio_bytes)} bytes ({audio_mime})")
 
             # ── Step 1: STT ──────────────────────────────────────
-            user_text = await speech_to_text(audio_bytes, audio_mime)
+            user_text = await speech_to_text(audio_bytes, audio_mime, language_code)
             if not user_text or not user_text.strip():
                 await ws.send_json({"type": "error", "text": "Samajh nahi aaya, dobara bolo."})
                 await ws.send_json({"type": "ready"})
@@ -141,7 +143,7 @@ async def websocket_endpoint(ws: WebSocket):
             pass
 
 
-async def speech_to_text(audio_bytes: bytes, mime: str = "audio/webm") -> str:
+async def speech_to_text(audio_bytes: bytes, mime: str = "audio/webm", language_code: str = "unknown") -> str:
     base_mime = mime.split(";")[0].strip()
     ext_map = {
         "audio/webm": "webm",
@@ -157,7 +159,7 @@ async def speech_to_text(audio_bytes: bytes, mime: str = "audio/webm") -> str:
                 "https://api.sarvam.ai/speech-to-text",
                 headers={"api-subscription-key": SARVAM_API_KEY},
                 files={"file": (f"audio.{ext}", audio_bytes, mime)},
-                data={"language_code": "hi-IN", "model": "saaras:v3"},
+                data={"language_code": language_code, "model": "saaras:v3"},
             )
             if not response.is_success:
                 print(f"STT {response.status_code}: {response.text}")
