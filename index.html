@@ -199,6 +199,14 @@
       border: 1px solid var(--border);
       box-shadow: 0 2px 8px var(--shadow);
     }
+    .latency-badge {
+      font-size: 0.67rem;
+      color: var(--text-3);
+      text-align: right;
+      margin-top: 5px;
+      opacity: 0.75;
+      letter-spacing: 0.02em;
+    }
     .msg.error {
       background: #fef2f2;
       color: #b91c1c;
@@ -852,6 +860,8 @@ let silenceTimer = null, speechStart = null, animFrame = null, currentAudio = nu
 let dynamicThreshold = SILENCE_THRESHOLD, maxSpeechTimer = null;
 let ttsStreamComplete = false, scheduledEndTime = 0, pendingBuffers = 0;
 let isMuted = false, pendingSettings = null, intentionalClose = false;
+let activeAudioSources = [];
+let turnStartTime = null, firstAudioLatency = null;
 
 // DOM
 const orb           = document.getElementById("orb");
@@ -1055,11 +1065,17 @@ function setStatus(state, text, sub) {
   else if (state === "processing") connLabel.textContent = "Processing…";
   else if (state === "muted")      connLabel.textContent = "Muted";
 }
-function addMsg(role, text) {
+function addMsg(role, text, latencyMs = null) {
   if (emptyState.parentNode) emptyState.remove();
   const d = document.createElement("div");
   d.className = "msg " + role;
   d.textContent = text;
+  if (latencyMs !== null && role === "agent") {
+    const badge = document.createElement("div");
+    badge.className = "latency-badge";
+    badge.textContent = `↯ ${(latencyMs / 1000).toFixed(1)}s`;
+    d.appendChild(badge);
+  }
   chatWrap.appendChild(d);
   chatWrap.scrollTop = chatWrap.scrollHeight;
 }
@@ -1099,12 +1115,13 @@ function connectWS() {
   ws.onmessage = async (event) => {
     if (event.data instanceof Blob) { enqueueAudio(event.data); return; }
     const msg = JSON.parse(event.data);
-    if      (msg.type === "user_transcript")  { addMsg("user",  msg.text); setStatus("processing", "Thinking…",  "Processing"); }
-    else if (msg.type === "agent_transcript") { addMsg("agent", msg.text); }
+    if      (msg.type === "user_transcript")  { addMsg("user",  msg.text); setStatus("processing", "Thinking…", "Processing"); }
+    else if (msg.type === "agent_transcript") { addMsg("agent", msg.text, firstAudioLatency); }
     else if (msg.type === "tts_end")          { handleTtsEnd(); }
     else if (msg.type === "tts_fallback")     { speakWithBrowser(msg.text); }
     else if (msg.type === "error")            { addMsg("error", msg.text); resumeListening(); }
     else if (msg.type === "ready")            { resumeListening(); }
+    else if (msg.type === "interrupted")      { /* frontend already stopped audio in handleInterrupt */ }
   };
 }
 
@@ -1158,6 +1175,7 @@ function teardown() {
   cancelAnimationFrame(animFrame);
   clearTimeout(silenceTimer);
   clearTimeout(maxSpeechTimer);
+  stopAllAudio();
   if (mediaRecorder && mediaRecorder.state !== "inactive") { try { mediaRecorder.stop(); } catch (e) {} }
   if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
   if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; analyser = null; }
@@ -1165,6 +1183,7 @@ function teardown() {
   isSpeaking = isAgentSpeaking = isMuted = false;
   chunks = []; pendingBuffers = 0; ttsStreamComplete = false; scheduledEndTime = 0;
   silenceTimer = speechStart = animFrame = null;
+  turnStartTime = null; firstAudioLatency = null;
   startBtn.classList.remove("hidden");
   connectedBar.classList.remove("show");
   brandDot.classList.remove("live");
@@ -1194,11 +1213,18 @@ function vadLoop() {
   cancelAnimationFrame(animFrame);
   const data = new Uint8Array(analyser.frequencyBinCount);
   function tick() {
-    if (isAgentSpeaking) return;
     analyser.getByteFrequencyData(data);
+    const rms = getSpeechRMS(data);
+
+    if (isAgentSpeaking) {
+      volBar.style.width = "0%";
+      if (rms > dynamicThreshold * 1.5) handleInterrupt();
+      animFrame = requestAnimationFrame(tick);
+      return;
+    }
+
     const fullRms = Math.sqrt(data.reduce((s,v) => s+v*v, 0) / data.length) / 255;
     volBar.style.width = Math.min(fullRms * 500, 100) + "%";
-    const rms = getSpeechRMS(data);
     if (rms > dynamicThreshold) {
       if (!isSpeaking) {
         isSpeaking = true; speechStart = Date.now();
@@ -1217,6 +1243,29 @@ function vadLoop() {
   }
   animFrame = requestAnimationFrame(tick);
 }
+function stopAllAudio() {
+  for (const src of activeAudioSources) {
+    try { src.stop(0); } catch (e) {}
+  }
+  activeAudioSources = [];
+  scheduledEndTime = 0;
+}
+function handleInterrupt() {
+  if (!isAgentSpeaking) return;
+  stopAllAudio();
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "interrupt" }));
+  }
+  isAgentSpeaking = false;
+  pendingBuffers = 0;
+  ttsStreamComplete = false;
+  isSpeaking = false;
+  chunks = [];
+  clearTimeout(silenceTimer); clearTimeout(maxSpeechTimer);
+  silenceTimer = null; speechStart = null; maxSpeechTimer = null;
+  startRecorder();
+  setStatus("listening", "Listening…", "Listening");
+}
 function sendAudio() {
   cancelAnimationFrame(animFrame);
   mediaRecorder.stop();
@@ -1227,6 +1276,8 @@ function sendAudio() {
     if (blob.size < 1000) { resumeListening(); return; }
     ws.send(JSON.stringify({ type: "audio_mime", mime }));
     setStatus("processing", "Processing…", "Processing");
+    turnStartTime = Date.now();
+    firstAudioLatency = null;
     ws.send(await blob.arrayBuffer());
   };
 }
@@ -1249,9 +1300,10 @@ function speakWithBrowser(text) {
 async function enqueueAudio(blob) {
   if (!isAgentSpeaking) {
     isAgentSpeaking = true;
-    cancelAnimationFrame(animFrame);
-    volBar.style.width = "0%";
     setStatus("speaking", "Speaking…", "Agent speaking");
+  }
+  if (firstAudioLatency === null && turnStartTime !== null) {
+    firstAudioLatency = Date.now() - turnStartTime;
   }
   pendingBuffers++;
   try {
@@ -1261,10 +1313,12 @@ async function enqueueAudio(blob) {
     const source = audioCtx.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(audioCtx.destination);
+    activeAudioSources.push(source);
     const startAt = Math.max(audioCtx.currentTime + 0.02, scheduledEndTime);
     source.start(startAt);
     scheduledEndTime = startAt + audioBuffer.duration;
     source.onended = () => {
+      activeAudioSources = activeAudioSources.filter(s => s !== source);
       pendingBuffers--;
       if (pendingBuffers === 0 && ttsStreamComplete) {
         isAgentSpeaking = false;
@@ -1304,7 +1358,11 @@ muteBtn.addEventListener("click", () => {
   } else {
     muteBtn.textContent = "Mute";
     muteBtn.classList.remove("muted");
-    resumeListening();
+    if (isAgentSpeaking) {
+      vadLoop();
+    } else {
+      resumeListening();
+    }
   }
 });
 
