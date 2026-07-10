@@ -4,3 +4,4 @@ websockets
 httpx
 python-dotenv
 python-multipart
+certifi

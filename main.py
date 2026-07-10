@@ -1,6 +1,10 @@
 import asyncio
+import io
 import os
 import json
+import ssl
+import wave
+import certifi
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
@@ -14,6 +18,8 @@ SARVAM_API_KEY      = os.getenv("SARVAM_API_KEY")
 ELEVENLABS_API_KEY  = os.getenv("ELEVENLABS_API_KEY")
 GROQ_API_KEY        = os.getenv("GROQ_API_KEY")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")
+
+SSL_CTX = ssl.create_default_context(cafile=certifi.where())
 
 SYSTEM_PROMPT = (
     "You are a helpful and friendly voice assistant. "
@@ -30,7 +36,6 @@ MIN_SENTENCE_LEN = 15
 
 
 def flush_sentences(buffer: str) -> tuple[list[str], str]:
-    """Return (complete_sentences, remaining_buffer)."""
     sentences = []
     while True:
         found = -1
@@ -58,23 +63,25 @@ async def websocket_endpoint(ws: WebSocket):
     print("Client connected")
 
     conversation_history = [{"role": "system", "content": SYSTEM_PROMPT}]
-    audio_mime      = "audio/webm"
     voice_id        = ELEVENLABS_VOICE_ID
     system_prompt   = SYSTEM_PROMPT
     language_code   = "unknown"
     active_turn     = None
     interrupt_event = asyncio.Event()
 
-    async def run_turn(audio_bytes: bytes, mime: str) -> None:
-        user_text = await speech_to_text(audio_bytes, mime, language_code)
-        if not user_text or not user_text.strip():
+    # STT buffering state
+    audio_buffer  = []
+    is_stt_active = False
+
+    async def run_turn(transcript: str) -> None:
+        if not transcript.strip():
             await ws.send_json({"type": "error", "text": "Samajh nahi aaya, dobara bolo."})
             await ws.send_json({"type": "ready"})
             return
 
-        print(f"[USER] {user_text}")
-        await ws.send_json({"type": "user_transcript", "text": user_text})
-        conversation_history.append({"role": "user", "content": user_text})
+        print(f"[USER] {transcript}")
+        await ws.send_json({"type": "user_transcript", "text": transcript})
+        conversation_history.append({"role": "user", "content": transcript})
 
         sentence_queue: asyncio.Queue = asyncio.Queue(maxsize=5)
         results = await asyncio.gather(
@@ -115,11 +122,7 @@ async def websocket_endpoint(ws: WebSocket):
             if "text" in msg:
                 data = json.loads(msg["text"])
 
-                if data.get("type") == "audio_mime":
-                    audio_mime = data["mime"]
-                    print(f"Mime set: {audio_mime}")
-
-                elif data.get("type") == "settings":
+                if data.get("type") == "settings":
                     voice_id      = data.get("voice_id", voice_id)
                     system_prompt = data.get("system_prompt", system_prompt)
                     language_code = data.get("language_code", language_code)
@@ -127,6 +130,44 @@ async def websocket_endpoint(ws: WebSocket):
                     print(f"Settings updated — voice: {voice_id}, lang: {language_code}")
                     print(f"System prompt: {system_prompt[:80]}...")
                     await ws.send_json({"type": "settings_ack"})
+
+                elif data.get("type") == "speech_start":
+                    print("STT stream starting — buffering PCM")
+                    is_stt_active = True
+                    audio_buffer.clear()
+
+                elif data.get("type") == "speech_end":
+                    print(f"STT stream ending — {len(audio_buffer)} chunks buffered")
+                    is_stt_active = False
+                    if not audio_buffer:
+                        await ws.send_json({"type": "error", "text": "Samajh nahi aaya, dobara bolo."})
+                        await ws.send_json({"type": "ready"})
+                        continue
+
+                    pcm_data = b"".join(audio_buffer)
+                    audio_buffer.clear()
+                    transcript = await speech_to_text(pcm_data, language_code)
+
+                    if not transcript:
+                        await ws.send_json({"type": "error", "text": "Samajh nahi aaya, dobara bolo."})
+                        await ws.send_json({"type": "ready"})
+                        continue
+
+                    if active_turn and not active_turn.done():
+                        interrupt_event.set()
+                        active_turn.cancel()
+                        try: await active_turn
+                        except (asyncio.CancelledError, Exception): pass
+
+                    interrupt_event.clear()
+                    active_turn = asyncio.create_task(run_turn(transcript))
+                    active_turn.add_done_callback(on_turn_done)
+
+                elif data.get("type") == "speech_cancel":
+                    print("STT cancelled (too short)")
+                    is_stt_active = False
+                    audio_buffer.clear()
+                    await ws.send_json({"type": "ready"})
 
                 elif data.get("type") == "interrupt":
                     print("Interrupt received")
@@ -138,21 +179,9 @@ async def websocket_endpoint(ws: WebSocket):
             if "bytes" not in msg or not msg["bytes"]:
                 continue
 
-            audio_bytes = msg["bytes"]
-            print(f"Audio received: {len(audio_bytes)} bytes ({audio_mime})")
-
-            if active_turn and not active_turn.done():
-                print("Cancelling active turn")
-                interrupt_event.set()
-                active_turn.cancel()
-                try:
-                    await active_turn
-                except (asyncio.CancelledError, Exception):
-                    pass
-
-            interrupt_event.clear()
-            active_turn = asyncio.create_task(run_turn(audio_bytes, audio_mime))
-            active_turn.add_done_callback(on_turn_done)
+            # Binary = PCM chunk from AudioWorklet — buffer it
+            if is_stt_active:
+                audio_buffer.append(msg["bytes"])
 
     except WebSocketDisconnect:
         print("Client disconnected")
@@ -175,29 +204,34 @@ async def websocket_endpoint(ws: WebSocket):
             pass
 
 
-async def speech_to_text(audio_bytes: bytes, mime: str = "audio/webm", language_code: str = "unknown") -> str:
-    base_mime = mime.split(";")[0].strip()
-    ext_map = {
-        "audio/webm": "webm",
-        "audio/mp4":  "mp4",
-        "audio/ogg":  "ogg",
-        "audio/wav":  "wav",
-    }
-    ext = ext_map.get(base_mime, "webm")
+def pcm_to_wav(pcm_data: bytes, sample_rate: int = 16000) -> bytes:
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)  # 16-bit
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_data)
+    return buf.getvalue()
 
+
+async def speech_to_text(pcm_data: bytes, language_code: str = "unknown") -> str:
+    wav_data = pcm_to_wav(pcm_data)
     try:
         async with httpx.AsyncClient(timeout=30) as client:
+            data = {"model": "saaras:v3"}
+            if language_code and language_code != "unknown":
+                data["language_code"] = language_code
             response = await client.post(
                 "https://api.sarvam.ai/speech-to-text",
                 headers={"api-subscription-key": SARVAM_API_KEY},
-                files={"file": (f"audio.{ext}", audio_bytes, mime)},
-                data={"language_code": language_code, "model": "saaras:v3"},
+                files={"file": ("audio.wav", wav_data, "audio/wav")},
+                data=data,
             )
             if not response.is_success:
                 print(f"STT {response.status_code}: {response.text}")
                 return ""
             result = response.json()
-            print(f"Sarvam: {result}")
+            print(f"Sarvam STT: {result}")
             return result.get("transcript", "")
     except Exception as e:
         print(f"STT error: {e}")
@@ -205,7 +239,6 @@ async def speech_to_text(audio_bytes: bytes, mime: str = "audio/webm", language_
 
 
 async def stream_llm_producer(history: list, queue: asyncio.Queue, interrupt: asyncio.Event) -> str:
-    """Stream Groq tokens, split into sentences, push to queue. Returns full text."""
     full_text = ""
     buffer = ""
     try:
@@ -254,8 +287,6 @@ async def stream_llm_producer(history: list, queue: asyncio.Queue, interrupt: as
 
 
 async def tts_consumer(queue: asyncio.Queue, ws: WebSocket, vid: str, interrupt: asyncio.Event) -> bool:
-    """Consume sentences from queue, collect full audio per sentence, send as one frame.
-    Returns True if at least one audio chunk was sent successfully."""
     vid = vid or ELEVENLABS_VOICE_ID
     audio_sent = False
     while True:

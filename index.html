@@ -782,7 +782,7 @@
           <div class="stack-pill">Groq</div>
           <div class="stack-pill">ElevenLabs</div>
           <div class="stack-pill">Web Audio API</div>
-          <div class="stack-pill">MediaRecorder API</div>
+          <div class="stack-pill">AudioWorklet API</div>
           <div class="stack-pill">VAD (custom)</div>
         </div>
       </div>
@@ -854,8 +854,37 @@ const SILENCE_DELAY_MS  = 2200;
 const MIN_SPEECH_MS     = 400;
 const MAX_SPEECH_MS     = 18000;
 
-let ws, audioCtx, analyser, mediaStream, mediaRecorder;
-let chunks = [], isSpeaking = false, isAgentSpeaking = false;
+const WORKLET_CODE = `
+class PCMProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this._buf = [];
+    this._bufLen = 0;
+    this._chunk = 640; // 40ms at 16kHz
+  }
+  process(inputs) {
+    const ch = inputs[0]?.[0];
+    if (!ch) return true;
+    for (let i = 0; i < ch.length; i++) this._buf.push(ch[i]);
+    this._bufLen += ch.length;
+    while (this._bufLen >= this._chunk) {
+      const samples = this._buf.splice(0, this._chunk);
+      this._bufLen -= this._chunk;
+      const out = new Int16Array(this._chunk);
+      for (let i = 0; i < this._chunk; i++) {
+        const s = Math.max(-1, Math.min(1, samples[i]));
+        out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+      this.port.postMessage(out.buffer, [out.buffer]);
+    }
+    return true;
+  }
+}
+registerProcessor('pcm-processor', PCMProcessor);
+`;
+
+let ws, audioCtx, analyser, mediaStream, pcmWorkletNode;
+let isSpeaking = false, isAgentSpeaking = false, isStreamingSTT = false;
 let silenceTimer = null, speechStart = null, animFrame = null, currentAudio = null;
 let dynamicThreshold = SILENCE_THRESHOLD, maxSpeechTimer = null;
 let ttsStreamComplete = false, scheduledEndTime = 0, pendingBuffers = 0;
@@ -1098,6 +1127,8 @@ function connectWS() {
   ws.onclose = () => {
     if (intentionalClose) { intentionalClose = false; return; }
     cancelAnimationFrame(animFrame);
+    isStreamingSTT = false;
+    if (pcmWorkletNode) { pcmWorkletNode.disconnect(); pcmWorkletNode = null; }
     if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
     if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; analyser = null; }
     isSpeaking = isAgentSpeaking = isMuted = false;
@@ -1149,12 +1180,24 @@ async function calibrateNoiseFloor() {
 }
 
 async function startListening() {
-  try { mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); }
-  catch (e) { setStatus("", "Mic denied: " + e.message); return; }
-  audioCtx = new AudioContext();
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    });
+  } catch (e) { setStatus("", "Mic denied: " + e.message); return; }
+  audioCtx = new AudioContext({ sampleRate: 16000 });
   analyser = audioCtx.createAnalyser();
   analyser.fftSize = 512;
-  audioCtx.createMediaStreamSource(mediaStream).connect(analyser);
+  const source = audioCtx.createMediaStreamSource(mediaStream);
+  source.connect(analyser);
+  const blob = new Blob([WORKLET_CODE], { type: 'application/javascript' });
+  const url = URL.createObjectURL(blob);
+  try { await audioCtx.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
+  pcmWorkletNode = new AudioWorkletNode(audioCtx, 'pcm-processor');
+  source.connect(pcmWorkletNode);
+  pcmWorkletNode.port.onmessage = (e) => {
+    if (isStreamingSTT && ws && ws.readyState === WebSocket.OPEN) ws.send(e.data);
+  };
   setStatus("listening", "Calibrating mic…", "Calibrating…");
   dynamicThreshold = await calibrateNoiseFloor();
   console.log("Noise threshold set to:", dynamicThreshold.toFixed(4));
@@ -1166,9 +1209,9 @@ function resumeListening() {
   scheduledEndTime = 0;
   pendingBuffers = 0;
   setStatus("listening", "Listening…", "Listening");
-  isSpeaking = false; chunks = []; silenceTimer = null; speechStart = null;
+  isSpeaking = false; isStreamingSTT = false; silenceTimer = null; speechStart = null;
   clearTimeout(maxSpeechTimer); maxSpeechTimer = null;
-  startRecorder(); vadLoop();
+  vadLoop();
 }
 function teardown() {
   intentionalClose = true;
@@ -1176,12 +1219,13 @@ function teardown() {
   clearTimeout(silenceTimer);
   clearTimeout(maxSpeechTimer);
   stopAllAudio();
-  if (mediaRecorder && mediaRecorder.state !== "inactive") { try { mediaRecorder.stop(); } catch (e) {} }
+  isStreamingSTT = false;
+  if (pcmWorkletNode) { pcmWorkletNode.disconnect(); pcmWorkletNode = null; }
   if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
   if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; analyser = null; }
   if (ws) { try { ws.close(); } catch (e) {} ws = null; }
   isSpeaking = isAgentSpeaking = isMuted = false;
-  chunks = []; pendingBuffers = 0; ttsStreamComplete = false; scheduledEndTime = 0;
+  pendingBuffers = 0; ttsStreamComplete = false; scheduledEndTime = 0;
   silenceTimer = speechStart = animFrame = null;
   turnStartTime = null; firstAudioLatency = null;
   startBtn.classList.remove("hidden");
@@ -1194,20 +1238,6 @@ function teardown() {
   connLabel.textContent = "Listening…";
   muteBtn.textContent = "Mute";
   muteBtn.classList.remove("muted");
-}
-function getSupportedMimeType() {
-  for (const t of ["audio/mp4","audio/webm;codecs=pcm","audio/webm","audio/ogg"])
-    if (MediaRecorder.isTypeSupported(t)) return t;
-  return "";
-}
-function startRecorder() {
-  if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
-  chunks = [];
-  const mt = getSupportedMimeType();
-  mediaRecorder = new MediaRecorder(mediaStream, mt ? { mimeType: mt } : {});
-  window._recMime = mediaRecorder.mimeType;
-  mediaRecorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
-  mediaRecorder.start(100);
 }
 function vadLoop() {
   cancelAnimationFrame(animFrame);
@@ -1230,18 +1260,38 @@ function vadLoop() {
         isSpeaking = true; speechStart = Date.now();
         clearTimeout(silenceTimer); silenceTimer = null;
         clearTimeout(maxSpeechTimer);
-        maxSpeechTimer = setTimeout(() => { if (isSpeaking) sendAudio(); }, MAX_SPEECH_MS);
+        isStreamingSTT = true;
+        if (ws && ws.readyState === WebSocket.OPEN)
+          ws.send(JSON.stringify({ type: "speech_start" }));
+        maxSpeechTimer = setTimeout(() => { if (isSpeaking) endSpeech(); }, MAX_SPEECH_MS);
       }
     } else if (isSpeaking && !silenceTimer) {
       silenceTimer = setTimeout(() => {
         clearTimeout(maxSpeechTimer); maxSpeechTimer = null;
-        if (Date.now() - speechStart >= MIN_SPEECH_MS) sendAudio();
-        else { isSpeaking = false; speechStart = null; silenceTimer = null; }
+        if (Date.now() - speechStart >= MIN_SPEECH_MS) {
+          endSpeech();
+        } else {
+          isSpeaking = false; speechStart = null; silenceTimer = null;
+          isStreamingSTT = false;
+          if (ws && ws.readyState === WebSocket.OPEN)
+            ws.send(JSON.stringify({ type: "speech_cancel" }));
+        }
       }, SILENCE_DELAY_MS);
     }
     animFrame = requestAnimationFrame(tick);
   }
   animFrame = requestAnimationFrame(tick);
+}
+function endSpeech() {
+  cancelAnimationFrame(animFrame);
+  isSpeaking = false; isStreamingSTT = false;
+  silenceTimer = null; speechStart = null;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    turnStartTime = Date.now();
+    firstAudioLatency = null;
+    ws.send(JSON.stringify({ type: "speech_end" }));
+    setStatus("processing", "Processing…", "Processing");
+  }
 }
 function stopAllAudio() {
   for (const src of activeAudioSources) {
@@ -1253,6 +1303,7 @@ function stopAllAudio() {
 function handleInterrupt() {
   if (!isAgentSpeaking) return;
   stopAllAudio();
+  isStreamingSTT = false;
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "interrupt" }));
   }
@@ -1260,26 +1311,9 @@ function handleInterrupt() {
   pendingBuffers = 0;
   ttsStreamComplete = false;
   isSpeaking = false;
-  chunks = [];
   clearTimeout(silenceTimer); clearTimeout(maxSpeechTimer);
   silenceTimer = null; speechStart = null; maxSpeechTimer = null;
-  startRecorder();
   setStatus("listening", "Listening…", "Listening");
-}
-function sendAudio() {
-  cancelAnimationFrame(animFrame);
-  mediaRecorder.stop();
-  mediaRecorder.onstop = async () => {
-    if (isMuted) { chunks = []; return; }
-    const mime = window._recMime || "audio/webm";
-    const blob = new Blob(chunks, { type: mime });
-    if (blob.size < 1000) { resumeListening(); return; }
-    ws.send(JSON.stringify({ type: "audio_mime", mime }));
-    setStatus("processing", "Processing…", "Processing");
-    turnStartTime = Date.now();
-    firstAudioLatency = null;
-    ws.send(await blob.arrayBuffer());
-  };
 }
 
 // ── Browser TTS fallback ──────────────────────────────────
@@ -1348,6 +1382,7 @@ muteBtn.addEventListener("click", () => {
   isMuted = !isMuted;
   if (isMuted) {
     cancelAnimationFrame(animFrame);
+    isStreamingSTT = false;
     isSpeaking = false;
     clearTimeout(silenceTimer); clearTimeout(maxSpeechTimer);
     silenceTimer = null; speechStart = null;
