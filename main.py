@@ -1,11 +1,14 @@
 import asyncio
-import io
+import base64
 import os
 import json
 import ssl
-import wave
+from urllib.parse import urlencode
 import certifi
 import httpx
+from websockets.asyncio.client import connect as ws_connect
+
+SSL_CTX = ssl.create_default_context(cafile=certifi.where())
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from dotenv import load_dotenv
@@ -19,7 +22,7 @@ ELEVENLABS_API_KEY  = os.getenv("ELEVENLABS_API_KEY")
 GROQ_API_KEY        = os.getenv("GROQ_API_KEY")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")
 
-SSL_CTX = ssl.create_default_context(cafile=certifi.where())
+SARVAM_STT_WS = "wss://api.sarvam.ai/speech-to-text/ws"
 
 SYSTEM_PROMPT = (
     "You are a helpful and friendly voice assistant. "
@@ -52,6 +55,36 @@ def flush_sentences(buffer: str) -> tuple[list[str], str]:
     return sentences, buffer
 
 
+async def connect_sarvam_ws(language_code: str):
+    """Open a Sarvam STT WebSocket with config in URL params."""
+    params = {
+        "model": "saaras:v3",
+        "mode": "transcribe",
+        "sample_rate": "16000",
+        "input_audio_codec": "pcm_s16le",
+        "flush_signal": "true",
+    }
+    if language_code and language_code != "unknown":
+        params["language-code"] = language_code
+    url = f"{SARVAM_STT_WS}?{urlencode(params)}"
+    print(f"Connecting to Sarvam: {url}")
+    return await ws_connect(url, additional_headers={"api-subscription-key": SARVAM_API_KEY}, ssl=SSL_CTX)
+
+
+async def sarvam_reader(sarvam_ws, transcript_queue: asyncio.Queue):
+    """Background task: drain Sarvam responses and push transcripts to queue."""
+    try:
+        async for msg in sarvam_ws:
+            data = json.loads(msg)
+            print(f"Sarvam msg: {data}")          # log everything
+            if data.get("type") == "data":
+                transcript = data.get("data", {}).get("transcript", "")
+                if transcript:
+                    await transcript_queue.put(transcript)
+    except Exception as e:
+        print(f"Sarvam reader closed: {e}")
+
+
 @app.get("/")
 async def get():
     return HTMLResponse(open("index.html").read())
@@ -68,10 +101,11 @@ async def websocket_endpoint(ws: WebSocket):
     language_code   = "unknown"
     active_turn     = None
     interrupt_event = asyncio.Event()
+    transcript_queue = asyncio.Queue()
 
-    # STT buffering state
-    audio_buffer  = []
-    is_stt_active = False
+    # Sarvam WS opened per-utterance on speech_start (avoids idle timeout)
+    sarvam_ws   = None
+    reader_task = None
 
     async def run_turn(transcript: str) -> None:
         if not transcript.strip():
@@ -123,30 +157,33 @@ async def websocket_endpoint(ws: WebSocket):
                 data = json.loads(msg["text"])
 
                 if data.get("type") == "settings":
+                    language_code = data.get("language_code", language_code)
                     voice_id      = data.get("voice_id", voice_id)
                     system_prompt = data.get("system_prompt", system_prompt)
-                    language_code = data.get("language_code", language_code)
                     conversation_history = [{"role": "system", "content": system_prompt}]
                     print(f"Settings updated — voice: {voice_id}, lang: {language_code}")
-                    print(f"System prompt: {system_prompt[:80]}...")
                     await ws.send_json({"type": "settings_ack"})
 
                 elif data.get("type") == "speech_start":
-                    print("STT stream starting — buffering PCM")
-                    is_stt_active = True
-                    audio_buffer.clear()
+                    print("STT stream starting")
+                    while not transcript_queue.empty():
+                        transcript_queue.get_nowait()
+                    # Open fresh Sarvam WS per utterance — avoids idle timeout
+                    sarvam_ws   = await connect_sarvam_ws(language_code)
+                    reader_task = asyncio.create_task(sarvam_reader(sarvam_ws, transcript_queue))
 
                 elif data.get("type") == "speech_end":
-                    print(f"STT stream ending — {len(audio_buffer)} chunks buffered")
-                    is_stt_active = False
-                    if not audio_buffer:
-                        await ws.send_json({"type": "error", "text": "Samajh nahi aaya, dobara bolo."})
-                        await ws.send_json({"type": "ready"})
-                        continue
+                    print("STT stream ending — flushing Sarvam")
+                    await sarvam_ws.send(json.dumps({"type": "flush"}))
 
-                    pcm_data = b"".join(audio_buffer)
-                    audio_buffer.clear()
-                    transcript = await speech_to_text(pcm_data, language_code)
+                    try:
+                        transcript = await asyncio.wait_for(transcript_queue.get(), timeout=10.0)
+                    except asyncio.TimeoutError:
+                        transcript = ""
+
+                    reader_task.cancel()
+                    await sarvam_ws.close()
+                    sarvam_ws = None
 
                     if not transcript:
                         await ws.send_json({"type": "error", "text": "Samajh nahi aaya, dobara bolo."})
@@ -165,8 +202,13 @@ async def websocket_endpoint(ws: WebSocket):
 
                 elif data.get("type") == "speech_cancel":
                     print("STT cancelled (too short)")
-                    is_stt_active = False
-                    audio_buffer.clear()
+                    if reader_task:
+                        reader_task.cancel()
+                    if sarvam_ws:
+                        await sarvam_ws.close()
+                        sarvam_ws = None
+                    while not transcript_queue.empty():
+                        transcript_queue.get_nowait()
                     await ws.send_json({"type": "ready"})
 
                 elif data.get("type") == "interrupt":
@@ -179,9 +221,11 @@ async def websocket_endpoint(ws: WebSocket):
             if "bytes" not in msg or not msg["bytes"]:
                 continue
 
-            # Binary = PCM chunk from AudioWorklet — buffer it
-            if is_stt_active:
-                audio_buffer.append(msg["bytes"])
+            # Binary PCM chunk — forward to Sarvam in real-time
+            audio_b64 = base64.b64encode(msg["bytes"]).decode()
+            await sarvam_ws.send(json.dumps({
+                "audio": {"data": audio_b64, "sample_rate": 16000, "encoding": "audio/wav"},
+            }))
 
     except WebSocketDisconnect:
         print("Client disconnected")
@@ -202,40 +246,14 @@ async def websocket_endpoint(ws: WebSocket):
             await ws.send_json({"type": "error", "text": str(e)})
         except Exception:
             pass
-
-
-def pcm_to_wav(pcm_data: bytes, sample_rate: int = 16000) -> bytes:
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)  # 16-bit
-        wf.setframerate(sample_rate)
-        wf.writeframes(pcm_data)
-    return buf.getvalue()
-
-
-async def speech_to_text(pcm_data: bytes, language_code: str = "unknown") -> str:
-    wav_data = pcm_to_wav(pcm_data)
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            data = {"model": "saaras:v3"}
-            if language_code and language_code != "unknown":
-                data["language_code"] = language_code
-            response = await client.post(
-                "https://api.sarvam.ai/speech-to-text",
-                headers={"api-subscription-key": SARVAM_API_KEY},
-                files={"file": ("audio.wav", wav_data, "audio/wav")},
-                data=data,
-            )
-            if not response.is_success:
-                print(f"STT {response.status_code}: {response.text}")
-                return ""
-            result = response.json()
-            print(f"Sarvam STT: {result}")
-            return result.get("transcript", "")
-    except Exception as e:
-        print(f"STT error: {e}")
-        return ""
+    finally:
+        if reader_task:
+            reader_task.cancel()
+        if sarvam_ws:
+            try:
+                await sarvam_ws.close()
+            except Exception:
+                pass
 
 
 async def stream_llm_producer(history: list, queue: asyncio.Queue, interrupt: asyncio.Event) -> str:

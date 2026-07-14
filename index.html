@@ -885,7 +885,7 @@ registerProcessor('pcm-processor', PCMProcessor);
 
 let ws, audioCtx, analyser, mediaStream, pcmWorkletNode;
 let isSpeaking = false, isAgentSpeaking = false, isStreamingSTT = false;
-let silenceTimer = null, speechStart = null, animFrame = null, currentAudio = null;
+let silenceTimer = null, speechStart = null, animFrame = null;
 let dynamicThreshold = SILENCE_THRESHOLD, maxSpeechTimer = null;
 let ttsStreamComplete = false, scheduledEndTime = 0, pendingBuffers = 0;
 let isMuted = false, pendingSettings = null, intentionalClose = false;
@@ -1095,7 +1095,7 @@ function setStatus(state, text, sub) {
   else if (state === "muted")      connLabel.textContent = "Muted";
 }
 function addMsg(role, text, latencyMs = null) {
-  if (emptyState.parentNode) emptyState.remove();
+  emptyState.remove();
   const d = document.createElement("div");
   d.className = "msg " + role;
   d.textContent = text;
@@ -1173,7 +1173,7 @@ async function calibrateNoiseFloor() {
       analyser.getByteFrequencyData(buf);
       sum += getSpeechRMS(buf);
       if (++frames < 50) requestAnimationFrame(tick);
-      else resolve(Math.max((sum / frames) * 1.8, SILENCE_THRESHOLD));
+      else resolve(Math.max((sum / frames) * 1.4, SILENCE_THRESHOLD));
     }
     requestAnimationFrame(tick);
   });
@@ -1200,7 +1200,7 @@ async function startListening() {
   };
   setStatus("listening", "Calibrating mic…", "Calibrating…");
   dynamicThreshold = await calibrateNoiseFloor();
-  console.log("Noise threshold set to:", dynamicThreshold.toFixed(4));
+
   resumeListening();
 }
 function resumeListening() {
