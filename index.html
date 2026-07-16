@@ -538,13 +538,13 @@
       <div class="field-label">Voice</div>
       <select id="voice-select">
         <optgroup label="Global Accents">
-          <option value="JBFqnCBsd6RMkjVDRZzb">George — British Male (Default)</option>
-          <option value="21m00Tcm4TlvDq8ikWAM">Rachel — American Female</option>
-          <option value="AZnzlk1XvdvUeBnXmlld">Domi — American Female</option>
-          <option value="EXAVITQu4vr4xnSDxMaL">Bella — American Female</option>
-          <option value="ErXwobaYiN019PkySvjV">Antoni — American Male</option>
-          <option value="VR6AewLTigWG4xSOukaG">Arnold — American Male</option>
-          <option value="pNInz6obpgDQGcFmaJgB">Adam — American Male</option>
+          <option value="bajNon13EdhNMndG3z05">Viraj - Indian Male (Default)</option>
+          <option value="6qL48o1LBmtR94hIYAQh">Monika Sogam - Indian Female</option>
+          <option value="1XNFRxE3WBB7iI0jnm7p">Aaira - Indian Female</option>
+          <option value="LHJy3mhZWsvhUjy0zUM1">Amrut Deshmukh - Indian Male</option>
+          <option value="EXAVITQu4vr4xnSDxMaL">Bella - American Female</option>
+          <option value="VR6AewLTigWG4xSOukaG">Arnold - American Male</option>
+          <option value="pNInz6obpgDQGcFmaJgB">Adam - American Male</option>
         </optgroup>
         <option value="custom">Custom Voice ID…</option>
       </select>
@@ -622,9 +622,9 @@
       <div>
         <div class="section-title">What is this?</div>
         <p style="font-size:0.88rem;color:var(--text-2);line-height:1.65">
-          A fully real-time, browser-based voice agent. You speak — it listens, thinks, and talks back.
+          A fully real-time, browser-based voice agent. You speak - it listens, thinks, and talks back.
           No button to hold. Voice Activity Detection (VAD) automatically detects when you start and stop speaking.
-          Audio is processed through a concurrent async streaming pipeline — the LLM and TTS run in parallel,
+          Audio is processed through a concurrent async streaming pipeline - the LLM and TTS run in parallel,
           so you hear the first sentence while the rest is still being generated.
         </p>
       </div>
@@ -646,7 +646,7 @@
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
             </div>
             <div class="flow-label">STT</div>
-            <div class="flow-sub">Saaras v3</div>
+            <div class="flow-sub">Saaras v3 · streaming</div>
           </div>
           <div class="flow-arrow">→</div>
           <div class="flow-step">
@@ -683,7 +683,7 @@
             <div class="mc-role">Speech-to-Text</div>
             <div class="mc-name">Saaras v3</div>
             <div class="mc-by">by Sarvam AI</div>
-            <div class="mc-badge">Hindi + English</div>
+            <div class="mc-badge">11 Indian languages</div>
           </div>
           <div class="model-card">
             <div class="mc-role">Language Model</div>
@@ -706,11 +706,29 @@
         <div class="feature-list">
           <div class="feature-item">
             <div class="feature-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+            </div>
+            <div class="feature-text">
+              <div class="ft">Real-Time Streaming STT</div>
+              <div class="fd">Audio streams to Sarvam over a per-utterance WebSocket as you speak (16kHz PCM via AudioWorklet) - so transcription is already done the moment you stop talking. ~80–190ms transcription latency, no post-speech upload wait.</div>
+            </div>
+          </div>
+          <div class="feature-item">
+            <div class="feature-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+            </div>
+            <div class="feature-text">
+              <div class="ft">Interruptible (Barge-in)</div>
+              <div class="fd">Talk over the agent and it stops instantly - the in-flight LLM stream and TTS download are cancelled mid-sentence, and it starts listening to you again. Just like a real conversation.</div>
+            </div>
+          </div>
+          <div class="feature-item">
+            <div class="feature-icon">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
             </div>
             <div class="feature-text">
               <div class="ft">Auto Voice Activity Detection (VAD)</div>
-              <div class="fd">No button to hold — detects when you start and stop speaking using real-time frequency analysis in the 300–3400 Hz speech band.</div>
+              <div class="fd">No button to hold - detects when you start and stop speaking using real-time frequency analysis in the 300–3400 Hz speech band.</div>
             </div>
           </div>
           <div class="feature-item">
@@ -719,7 +737,7 @@
             </div>
             <div class="feature-text">
               <div class="ft">Concurrent Streaming Pipeline</div>
-              <div class="fd">LLM streams tokens sentence-by-sentence into a queue. TTS consumes each sentence in parallel — you hear the first sentence while the rest is still being generated.</div>
+              <div class="fd">LLM streams tokens sentence-by-sentence into a queue. TTS consumes each sentence in parallel - you hear the first sentence while the rest is still being generated.</div>
             </div>
           </div>
           <div class="feature-item">
@@ -728,7 +746,7 @@
             </div>
             <div class="feature-text">
               <div class="ft">Gapless Audio Playback</div>
-              <div class="fd">Uses Web Audio API to decode and schedule each sentence's audio buffer precisely back-to-back — no clicks or silence between sentences.</div>
+              <div class="fd">Uses Web Audio API to decode and schedule each sentence's audio buffer precisely back-to-back - no clicks or silence between sentences.</div>
             </div>
           </div>
           <div class="feature-item">
@@ -737,7 +755,7 @@
             </div>
             <div class="feature-text">
               <div class="ft">Live Transcript</div>
-              <div class="fd">Every exchange is shown in a chat UI — both your words and the agent's response appear in real-time.</div>
+              <div class="fd">Every exchange is shown in a chat UI - both your words and the agent's response appear in real-time.</div>
             </div>
           </div>
           <div class="feature-item">
@@ -755,7 +773,7 @@
             </div>
             <div class="feature-text">
               <div class="ft">Customizable Agent</div>
-              <div class="fd">Change voice (ElevenLabs voice ID) and personality (system prompt) live from the Settings panel — no restart needed.</div>
+              <div class="fd">Change voice (ElevenLabs voice ID) and personality (system prompt) live from the Settings panel - no restart needed.</div>
             </div>
           </div>
           <div class="feature-item">
@@ -764,7 +782,7 @@
             </div>
             <div class="feature-text">
               <div class="ft">Multilingual</div>
-              <div class="fd">Saaras v3 supports Hindi, English, and code-switched Hinglish. The LLM responds in the same language you speak.</div>
+              <div class="fd">Auto-detects and responds across 11 Indian languages (Hindi, Gujarati, Tamil, Telugu, Bengali & more), including code-switched Hinglish. The LLM replies in the same language you speak.</div>
             </div>
           </div>
         </div>

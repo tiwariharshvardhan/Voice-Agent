@@ -20,7 +20,7 @@ app = FastAPI()
 SARVAM_API_KEY      = os.getenv("SARVAM_API_KEY")
 ELEVENLABS_API_KEY  = os.getenv("ELEVENLABS_API_KEY")
 GROQ_API_KEY        = os.getenv("GROQ_API_KEY")
-ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "bajNon13EdhNMndG3z05")
 
 SARVAM_STT_WS = "wss://api.sarvam.ai/speech-to-text/ws"
 
