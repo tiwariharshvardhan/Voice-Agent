@@ -24,6 +24,8 @@ ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "bajNon13EdhNMndG3z05")
 
 SARVAM_STT_WS = "wss://api.sarvam.ai/speech-to-text/ws"
 
+DEBUG = os.getenv("SARVAM_DEBUG") == "1"   # set SARVAM_DEBUG=1 to log the full Sarvam wire traffic
+
 SYSTEM_PROMPT = (
     "You are a helpful and friendly voice assistant. "
     "Respond in the same language the user speaks. "
@@ -67,7 +69,7 @@ async def connect_sarvam_ws(language_code: str):
     if language_code and language_code != "unknown":
         params["language-code"] = language_code
     url = f"{SARVAM_STT_WS}?{urlencode(params)}"
-    print(f"Connecting to Sarvam: {url}")
+    if DEBUG: print(f"Connecting to Sarvam: {url}")
     return await ws_connect(url, additional_headers={"api-subscription-key": SARVAM_API_KEY}, ssl=SSL_CTX)
 
 
@@ -76,7 +78,7 @@ async def sarvam_reader(sarvam_ws, transcript_queue: asyncio.Queue):
     try:
         async for msg in sarvam_ws:
             data = json.loads(msg)
-            print(f"Sarvam msg: {data}")          # log everything
+            if DEBUG: print(f"Sarvam msg: {data}")
             if data.get("type") == "data":
                 transcript = data.get("data", {}).get("transcript", "")
                 if transcript:
