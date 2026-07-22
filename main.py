@@ -2,6 +2,7 @@ import asyncio
 import base64
 import os
 import json
+import re
 import ssl
 from urllib.parse import urlencode
 import certifi
@@ -12,6 +13,8 @@ SSL_CTX = ssl.create_default_context(cafile=certifi.where())
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from dotenv import load_dotenv
+
+from banking_tools import BANKING_TOOLS, new_account, execute_tool
 
 load_dotenv()
 
@@ -104,6 +107,8 @@ async def websocket_endpoint(ws: WebSocket):
     system_prompt   = SYSTEM_PROMPT
     language_code   = "unknown"
     active_turn     = None
+    active_tools    = None
+    account         = new_account()   # per-connection state — sessions never share
     interrupt_event = asyncio.Event()
     transcript_queue = asyncio.Queue()
 
@@ -119,11 +124,13 @@ async def websocket_endpoint(ws: WebSocket):
 
         print(f"[USER] {transcript}")
         await ws.send_json({"type": "user_transcript", "text": transcript})
+        turn_start = len(conversation_history)
         conversation_history.append({"role": "user", "content": transcript})
 
         sentence_queue: asyncio.Queue = asyncio.Queue(maxsize=5)
         results = await asyncio.gather(
-            stream_llm_producer(conversation_history, sentence_queue, interrupt_event),
+            stream_llm_producer(conversation_history, sentence_queue, interrupt_event,
+                                active_tools, account, ws),
             tts_consumer(sentence_queue, ws, voice_id, interrupt_event),
             return_exceptions=True,
         )
@@ -132,8 +139,9 @@ async def websocket_endpoint(ws: WebSocket):
 
         if interrupt_event.is_set():
             print(f"[INTERRUPTED] {full_text[:60]}")
-            if conversation_history and conversation_history[-1]["role"] == "user":
-                conversation_history.pop()
+            # Drop the whole turn — including any tool-call/tool messages the
+            # hop-loop appended — so history never ends on a dangling tool msg.
+            del conversation_history[turn_start:]
             await ws.send_json({"type": "interrupted"})
             return
 
@@ -164,8 +172,9 @@ async def websocket_endpoint(ws: WebSocket):
                     language_code = data.get("language_code", language_code)
                     voice_id      = data.get("voice_id", voice_id)
                     system_prompt = data.get("system_prompt", system_prompt)
+                    active_tools  = BANKING_TOOLS if data.get("tools") == "banking" else None
                     conversation_history = [{"role": "system", "content": system_prompt}]
-                    print(f"Settings updated — voice: {voice_id}, lang: {language_code}")
+                    print(f"Settings updated — voice: {voice_id}, lang: {language_code}, tools: {'banking' if active_tools else 'none'}")
                     await ws.send_json({"type": "settings_ack"})
 
                 elif data.get("type") == "speech_start":
@@ -260,45 +269,97 @@ async def websocket_endpoint(ws: WebSocket):
                 pass
 
 
-async def stream_llm_producer(history: list, queue: asyncio.Queue, interrupt: asyncio.Event) -> str:
-    full_text = ""
+MAX_HOPS = 4  # ponytail: fixed hop cap; raise only if a real multi-tool flow needs it
+
+
+def accumulate_tool_calls(acc: dict, deltas: list) -> None:
+    """Merge one chunk's tool_call deltas into acc {index: {id, name, args}}.
+    Name arrives whole; arguments arrive fragmented across chunks."""
+    for tc in deltas:
+        slot = acc.setdefault(tc["index"], {"id": "", "name": "", "args": ""})
+        if tc.get("id"):
+            slot["id"] = tc["id"]
+        fn = tc.get("function") or {}
+        if fn.get("name"):
+            slot["name"] += fn["name"]
+        if fn.get("arguments"):
+            slot["args"] += fn["arguments"]
+
+
+async def _stream_once(history, queue, interrupt, tools):
+    """One Groq streaming pass. Text streams to the TTS queue as today;
+    tool-call deltas are reassembled. Never emits the None sentinel."""
+    text = ""
     buffer = ""
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            async with client.stream(
-                "POST",
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {GROQ_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "llama-3.3-70b-versatile",
-                    "messages": history,
-                    "max_tokens": 600,
-                    "stream": True,
-                },
-            ) as resp:
-                async for line in resp.aiter_lines():
+    calls: dict = {}
+    body = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": history,
+        "max_tokens": 600,
+        "stream": True,
+    }
+    if tools:
+        body["tools"] = tools
+        body["tool_choice"] = "auto"
+    async with httpx.AsyncClient(timeout=60) as client:
+        async with client.stream(
+            "POST",
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=body,
+        ) as resp:
+            async for line in resp.aiter_lines():
+                if interrupt.is_set():
+                    break
+                if not line.startswith("data: ") or line.strip() == "data: [DONE]":
+                    continue
+                try:
+                    delta = json.loads(line[6:])["choices"][0]["delta"]
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    continue
+                if delta.get("tool_calls"):
+                    accumulate_tool_calls(calls, delta["tool_calls"])
+                content = delta.get("content") or ""
+                if not content:
+                    continue
+                content = re.sub(r"<function=\w+>.*?</function>", "", content, flags=re.DOTALL)
+                if not content.strip():
+                    continue
+                text += content
+                buffer += content
+                sentences, buffer = flush_sentences(buffer)
+                for s in sentences:
                     if interrupt.is_set():
                         break
-                    if not line.startswith("data: ") or line.strip() == "data: [DONE]":
-                        continue
-                    try:
-                        delta = json.loads(line[6:])["choices"][0]["delta"].get("content", "")
-                    except (json.JSONDecodeError, KeyError, IndexError):
-                        continue
-                    if not delta:
-                        continue
-                    full_text += delta
-                    buffer += delta
-                    sentences, buffer = flush_sentences(buffer)
-                    for s in sentences:
-                        if interrupt.is_set():
-                            break
-                        await queue.put(s)
-        if buffer.strip() and not interrupt.is_set():
-            await queue.put(buffer.strip())
+                    await queue.put(s)
+    if buffer.strip() and not interrupt.is_set():
+        await queue.put(buffer.strip())
+    return text, [calls[i] for i in sorted(calls)]
+
+
+async def stream_llm_producer(history: list, queue: asyncio.Queue, interrupt: asyncio.Event,
+                              tools=None, account=None, ws=None) -> str:
+    full_text = ""
+    try:
+        for _ in range(MAX_HOPS):
+            text, tool_calls = await _stream_once(history, queue, interrupt, tools)
+            full_text += text
+            if not tool_calls or interrupt.is_set():
+                break
+            history.append({"role": "assistant", "content": None, "tool_calls": [
+                {"id": tc["id"], "type": "function",
+                 "function": {"name": tc["name"], "arguments": tc["args"] or "{}"}}
+                for tc in tool_calls
+            ]})
+            for tc in tool_calls:
+                result = execute_tool(tc["name"], tc["args"], account)
+                print(f"[TOOL] {tc['name']}({tc['args']}) -> {result}")
+                if ws is not None:
+                    await ws.send_json({"type": "tool_call", "name": tc["name"], "result": result})
+                history.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
     except asyncio.CancelledError:
         pass
     except Exception as e:

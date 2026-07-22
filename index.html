@@ -207,6 +207,30 @@
       opacity: 0.75;
       letter-spacing: 0.02em;
     }
+    .tool-chip {
+      align-self: flex-start;
+      font-size: 0.72rem;
+      font-family: monospace;
+      color: var(--accent-dk);
+      background: var(--accent-lt);
+      border: 1px solid var(--accent);
+      border-radius: 99px;
+      padding: 3px 10px;
+    }
+    .tool-result {
+      align-self: flex-start;
+      max-width: 78%;
+      font-size: 0.8rem;
+      font-family: monospace;
+      color: var(--accent-dk);
+      background: var(--accent-lt);
+      border: 1px solid var(--accent);
+      border-radius: 12px;
+      padding: 8px 12px;
+      margin-top: 4px;
+      white-space: pre-wrap;
+      line-height: 1.5;
+    }
     .msg.error {
       background: #fef2f2;
       color: #b91c1c;
@@ -1085,7 +1109,8 @@ applyBtn.addEventListener("click", () => {
   const langCode = langSelect.value;
   if (!voiceId) { showApplyStatus("Voice ID is empty", "error"); return; }
   if (!prompt)  { showApplyStatus("System prompt is empty", "error"); return; }
-  const payload = { type: "settings", voice_id: voiceId, system_prompt: prompt, language_code: langCode };
+  const payload = { type: "settings", voice_id: voiceId, system_prompt: prompt, language_code: langCode,
+                    tools: promptSelect.value === "banking" ? "banking" : "" };
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(payload));
     showApplyStatus("Settings applied!", "ok");
@@ -1124,6 +1149,20 @@ function addMsg(role, text, latencyMs = null) {
     d.appendChild(badge);
   }
   chatWrap.appendChild(d);
+  chatWrap.scrollTop = chatWrap.scrollHeight;
+}
+function addToolChip(name, result) {
+  emptyState.remove();
+  const c = document.createElement("div");
+  c.className = "tool-chip";
+  c.textContent = name;
+  chatWrap.appendChild(c);
+  if (result) {
+    const r = document.createElement("div");
+    r.className = "tool-result";
+    r.textContent = result;
+    chatWrap.appendChild(r);
+  }
   chatWrap.scrollTop = chatWrap.scrollHeight;
 }
 
@@ -1169,6 +1208,7 @@ function connectWS() {
     else if (msg.type === "tts_end")          { handleTtsEnd(); }
     else if (msg.type === "tts_fallback")     { speakWithBrowser(msg.text); }
     else if (msg.type === "error")            { addMsg("error", msg.text); resumeListening(); }
+    else if (msg.type === "tool_call")        { addToolChip(msg.name, msg.result); }
     else if (msg.type === "ready")            { resumeListening(); }
     else if (msg.type === "interrupted")      { /* frontend already stopped audio in handleInterrupt */ }
   };
