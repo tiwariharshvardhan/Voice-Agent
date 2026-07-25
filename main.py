@@ -14,7 +14,14 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from dotenv import load_dotenv
 
-from banking_tools import BANKING_TOOLS, new_account, execute_tool
+import banking_tools
+import telecom_tools
+
+# toolset name -> (tool schemas, per-connection account factory, dispatcher)
+TOOLSETS = {
+    "banking": (banking_tools.BANKING_TOOLS, banking_tools.new_account, banking_tools.execute_tool),
+    "telecom": (telecom_tools.TELECOM_TOOLS, telecom_tools.new_account, telecom_tools.execute_tool),
+}
 
 load_dotenv()
 
@@ -108,7 +115,8 @@ async def websocket_endpoint(ws: WebSocket):
     language_code   = "unknown"
     active_turn     = None
     active_tools    = None
-    account         = new_account()   # per-connection state — sessions never share
+    account         = None            # per-connection state — sessions never share
+    exec_tool       = None
     interrupt_event = asyncio.Event()
     transcript_queue = asyncio.Queue()
 
@@ -130,7 +138,7 @@ async def websocket_endpoint(ws: WebSocket):
         sentence_queue: asyncio.Queue = asyncio.Queue(maxsize=5)
         results = await asyncio.gather(
             stream_llm_producer(conversation_history, sentence_queue, interrupt_event,
-                                active_tools, account, ws),
+                                active_tools, account, ws, exec_tool),
             tts_consumer(sentence_queue, ws, voice_id, interrupt_event),
             return_exceptions=True,
         )
@@ -172,9 +180,11 @@ async def websocket_endpoint(ws: WebSocket):
                     language_code = data.get("language_code", language_code)
                     voice_id      = data.get("voice_id", voice_id)
                     system_prompt = data.get("system_prompt", system_prompt)
-                    active_tools  = BANKING_TOOLS if data.get("tools") == "banking" else None
+                    toolset = TOOLSETS.get(data.get("tools"))
+                    active_tools, account, exec_tool = (
+                        (toolset[0], toolset[1](), toolset[2]) if toolset else (None, None, None))
                     conversation_history = [{"role": "system", "content": system_prompt}]
-                    print(f"Settings updated — voice: {voice_id}, lang: {language_code}, tools: {'banking' if active_tools else 'none'}")
+                    print(f"Settings updated — voice: {voice_id}, lang: {language_code}, tools: {data.get('tools') or 'none'}")
                     await ws.send_json({"type": "settings_ack"})
 
                 elif data.get("type") == "speech_start":
@@ -341,7 +351,7 @@ async def _stream_once(history, queue, interrupt, tools):
 
 
 async def stream_llm_producer(history: list, queue: asyncio.Queue, interrupt: asyncio.Event,
-                              tools=None, account=None, ws=None) -> str:
+                              tools=None, account=None, ws=None, exec_tool=None) -> str:
     full_text = ""
     try:
         for _ in range(MAX_HOPS):
@@ -355,7 +365,7 @@ async def stream_llm_producer(history: list, queue: asyncio.Queue, interrupt: as
                 for tc in tool_calls
             ]})
             for tc in tool_calls:
-                result = execute_tool(tc["name"], tc["args"], account)
+                result = exec_tool(tc["name"], tc["args"], account)
                 print(f"[TOOL] {tc['name']}({tc['args']}) -> {result}")
                 if ws is not None:
                     await ws.send_json({"type": "tool_call", "name": tc["name"], "result": result})
