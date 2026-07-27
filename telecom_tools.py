@@ -139,9 +139,11 @@ TELECOM_TOOLS = [
         "'paise kat gaye', 'recharge nahi dikh raha', or any billing dispute.",
         {"n": {"type": "integer", "description": "How many entries, 1-5. Default 5."}}),
     _fn("check_outage",
-        "Check for a known network outage in the caller's area. Ask for their area/locality "
-        "first if not mentioned. Use for no-network, slow-data, call-drop complaints.",
-        {"area": {"type": "string", "description": "Locality/area name as the caller said it."}},
+        "Check for a known network outage in the caller's area. Use for no-network, slow-data, "
+        "call-drop complaints. ONLY call this after the caller has told you their area — if you "
+        "don't know it yet, ask them first instead of calling this tool. Never pass a placeholder "
+        "or made-up value.",
+        {"area": {"type": "string", "description": "The actual locality/area name exactly as the caller said it. Never a placeholder like 'customer's area'."}},
         ["area"]),
     _fn("check_number_status",
         "Look up the status of a phone number — active, deactivated, recoverable. Use when "

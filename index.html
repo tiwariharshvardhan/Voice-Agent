@@ -932,6 +932,11 @@ let dynamicThreshold = SILENCE_THRESHOLD, maxSpeechTimer = null;
 let ttsStreamComplete = false, scheduledEndTime = 0, pendingBuffers = 0;
 let isMuted = false, pendingSettings = null, intentionalClose = false;
 let activeAudioSources = [];
+let interruptFrames = 0, bargeDebugFrame = 0;
+let dropStaleAudio = false;   // true between an interrupt and the next turn's start
+let playbackGen = 0;          // bumped on every interrupt; orphans in-flight decodes
+let preBuffer = [];           // rolling mic audio so speech onsets aren't clipped
+const PRE_BUFFER_CHUNKS = 8;  // ~1s at the worklet's chunk size
 let turnStartTime = null, firstAudioLatency = null;
 
 // DOM
@@ -1031,7 +1036,7 @@ Start by greeting the customer formally and asking how you may assist them today
 
   telecom: `You are Asha, an AI customer care assistant for ConnectTel — a mobile network operator. You help customers over a live voice call with plans, recharges, network issues, SIM services, number recovery, and complaints.
 
-TONE: Warm, patient, efficient. Customers often call frustrated — acknowledge the problem in one short phrase, then move to fixing it. Keep replies to 2–3 spoken sentences. Respond in the customer's language, including Hinglish.
+TONE: Warm, patient, efficient. Customers often call frustrated — acknowledge the problem in one short phrase, then move to fixing it. Keep replies to 2–3 spoken sentences. Respond in the customer's language, including Hinglish. Asha is female — in gendered languages always use feminine first-person forms (e.g. "kar sakti hoon", "aayi hoon", never "kar sakta hoon").
 
 ABSOLUTE RULES — NON-NEGOTIABLE:
 - You are an AI assistant. NEVER claim to be a human, even if asked directly.
@@ -1221,16 +1226,21 @@ function connectWS() {
     muteBtn.classList.remove("muted");
   };
   ws.onmessage = async (event) => {
-    if (event.data instanceof Blob) { enqueueAudio(event.data); return; }
+    if (event.data instanceof Blob) {
+      // audio sent before the server saw our interrupt — belongs to a dead turn
+      if (dropStaleAudio) { console.debug("[barge-in] dropped stale audio chunk"); return; }
+      enqueueAudio(event.data);
+      return;
+    }
     const msg = JSON.parse(event.data);
-    if      (msg.type === "user_transcript")  { addMsg("user",  msg.text); setStatus("processing", "Thinking…", "Processing"); }
+    if      (msg.type === "user_transcript")  { dropStaleAudio = false; addMsg("user",  msg.text); setStatus("processing", "Thinking…", "Processing"); }
     else if (msg.type === "agent_transcript") { addMsg("agent", msg.text, firstAudioLatency); }
     else if (msg.type === "tts_end")          { handleTtsEnd(); }
     else if (msg.type === "tts_fallback")     { speakWithBrowser(msg.text); }
     else if (msg.type === "error")            { addMsg("error", msg.text); resumeListening(); }
     else if (msg.type === "tool_call")        { addToolChip(msg.name, msg.result); }
     else if (msg.type === "ready")            { resumeListening(); }
-    else if (msg.type === "interrupted")      { /* frontend already stopped audio in handleInterrupt */ }
+    else if (msg.type === "interrupted")      { dropStaleAudio = false; /* audio already stopped in handleInterrupt; all stale chunks precede this message on the wire */ }
   };
 }
 
@@ -1274,6 +1284,10 @@ async function startListening() {
   pcmWorkletNode = new AudioWorkletNode(audioCtx, 'pcm-processor');
   source.connect(pcmWorkletNode);
   pcmWorkletNode.port.onmessage = (e) => {
+    // rolling pre-buffer: VAD + barge-in detection eat ~150-300ms before streaming
+    // starts, so the utterance onset would be lost without replaying recent mic audio
+    preBuffer.push(e.data);
+    if (preBuffer.length > PRE_BUFFER_CHUNKS) preBuffer.shift();
     if (isStreamingSTT && ws && ws.readyState === WebSocket.OPEN) ws.send(e.data);
   };
   setStatus("listening", "Calibrating mic…", "Calibrating…");
@@ -1326,7 +1340,21 @@ function vadLoop() {
 
     if (isAgentSpeaking) {
       volBar.style.width = "0%";
-      if (rms > dynamicThreshold * 1.5) handleInterrupt();
+      // sustained speech (~8 net frames) fires barge-in. Leaky counter: dips between
+      // syllables lose progress slowly instead of resetting — AEC attenuates the mic
+      // during double-talk, so demand less than normal speech detection.
+      // AEC already removes the agent's own voice from the mic during playback, so
+      // sustained energy above the noise floor is the user. The 8-frame sustain is
+      // the false-positive guard — don't also demand extra loudness.
+      const bargeNeed = dynamicThreshold * 1.05;
+      interruptFrames = rms > bargeNeed ? interruptFrames + 1 : Math.max(0, interruptFrames - 1);
+      if (bargeDebugFrame++ % 30 === 0)
+        console.debug(`[barge-in] rms=${rms.toFixed(4)} need>${bargeNeed.toFixed(4)} frames=${interruptFrames}/8`);
+      if (interruptFrames >= 8) {
+        interruptFrames = 0;
+        console.debug("[barge-in] FIRED — stopping agent audio");
+        handleInterrupt();
+      }
       animFrame = requestAnimationFrame(tick);
       return;
     }
@@ -1339,8 +1367,11 @@ function vadLoop() {
         clearTimeout(silenceTimer); silenceTimer = null;
         clearTimeout(maxSpeechTimer);
         isStreamingSTT = true;
-        if (ws && ws.readyState === WebSocket.OPEN)
+        if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "speech_start" }));
+          for (const chunk of preBuffer) ws.send(chunk);   // replay the clipped onset
+          preBuffer = [];
+        }
         maxSpeechTimer = setTimeout(() => { if (isSpeaking) endSpeech(); }, MAX_SPEECH_MS);
       }
     } else if (isSpeaking && !silenceTimer) {
@@ -1372,6 +1403,7 @@ function endSpeech() {
   }
 }
 function stopAllAudio() {
+  playbackGen++;   // orphan every scheduled source and in-flight decode
   for (const src of activeAudioSources) {
     try { src.stop(0); } catch (e) {}
   }
@@ -1380,7 +1412,9 @@ function stopAllAudio() {
 }
 function handleInterrupt() {
   if (!isAgentSpeaking) return;
+  dropStaleAudio = true;
   stopAllAudio();
+  speechSynthesis.cancel();   // also silences the browser-TTS fallback
   isStreamingSTT = false;
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "interrupt" }));
@@ -1397,8 +1431,9 @@ function handleInterrupt() {
 // ── Browser TTS fallback ──────────────────────────────────
 function speakWithBrowser(text) {
   isAgentSpeaking = true;
-  cancelAnimationFrame(animFrame);
   volBar.style.width = "0%";
+  interruptFrames = 0;
+  vadLoop();   // keep watching the mic so barge-in works in the fallback path too
   const utt = new SpeechSynthesisUtterance(text);
   utt.lang = "hi-IN";
   utt.rate = 1.05;
@@ -1413,15 +1448,22 @@ async function enqueueAudio(blob) {
   if (!isAgentSpeaking) {
     isAgentSpeaking = true;
     setStatus("speaking", "Speaking…", "Agent speaking");
+    // endSpeech() cancelled the VAD loop; revive it so barge-in can fire during playback
+    interruptFrames = 0;
+    console.debug("[barge-in] agent speaking — VAD live, listening for interruptions");
+    vadLoop();
   }
   if (firstAudioLatency === null && turnStartTime !== null) {
     firstAudioLatency = Date.now() - turnStartTime;
   }
+  const gen = playbackGen;   // which turn this chunk belongs to
   pendingBuffers++;
   try {
     if (audioCtx.state === "suspended") await audioCtx.resume();
     const arrayBuffer = await blob.arrayBuffer();
     const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+    // interrupted while we were decoding — counters were already reset, just vanish
+    if (gen !== playbackGen) return;
     const source = audioCtx.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(audioCtx.destination);
@@ -1431,6 +1473,7 @@ async function enqueueAudio(blob) {
     scheduledEndTime = startAt + audioBuffer.duration;
     source.onended = () => {
       activeAudioSources = activeAudioSources.filter(s => s !== source);
+      if (gen !== playbackGen) return;   // stopped by an interrupt — don't touch counters
       pendingBuffers--;
       if (pendingBuffers === 0 && ttsStreamComplete) {
         isAgentSpeaking = false;
@@ -1439,6 +1482,7 @@ async function enqueueAudio(blob) {
     };
   } catch (e) {
     console.error("Audio decode error:", e);
+    if (gen !== playbackGen) return;
     pendingBuffers--;
     if (pendingBuffers === 0 && ttsStreamComplete) {
       isAgentSpeaking = false;

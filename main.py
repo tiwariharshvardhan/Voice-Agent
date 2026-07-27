@@ -52,6 +52,13 @@ SENTENCE_ENDERS = frozenset('.!?।\n')
 MIN_SENTENCE_LEN = 15
 
 
+def strip_fn_tags(text: str) -> str:
+    # Llama 3.3 intermittently emits tool calls as raw text; tags can arrive
+    # split across stream tokens, so strip on assembled sentences, not deltas.
+    text = re.sub(r"<function=\w+>.*?</function>", "", text, flags=re.DOTALL)
+    return re.sub(r"</?function[=\w]*>", "", text)
+
+
 def flush_sentences(buffer: str) -> tuple[list[str], str]:
     sentences = []
     while True:
@@ -192,10 +199,20 @@ async def websocket_endpoint(ws: WebSocket):
                     while not transcript_queue.empty():
                         transcript_queue.get_nowait()
                     # Open fresh Sarvam WS per utterance — avoids idle timeout
-                    sarvam_ws   = await connect_sarvam_ws(language_code)
-                    reader_task = asyncio.create_task(sarvam_reader(sarvam_ws, transcript_queue))
+                    try:
+                        sarvam_ws   = await connect_sarvam_ws(language_code)
+                        reader_task = asyncio.create_task(sarvam_reader(sarvam_ws, transcript_queue))
+                    except Exception as e:
+                        # STT unreachable must not kill the session — report and keep listening
+                        print(f"Sarvam connect failed: {e}")
+                        sarvam_ws, reader_task = None, None
+                        await ws.send_json({"type": "error", "text": "Awaaz seva mein dikkat hai, dobara bolo."})
+                        await ws.send_json({"type": "ready"})
 
                 elif data.get("type") == "speech_end":
+                    if sarvam_ws is None:   # connect failed at speech_start
+                        await ws.send_json({"type": "ready"})
+                        continue
                     print("STT stream ending — flushing Sarvam")
                     await sarvam_ws.send(json.dumps({"type": "flush"}))
 
@@ -241,7 +258,7 @@ async def websocket_endpoint(ws: WebSocket):
 
                 continue
 
-            if "bytes" not in msg or not msg["bytes"]:
+            if "bytes" not in msg or not msg["bytes"] or sarvam_ws is None:
                 continue
 
             # Binary PCM chunk — forward to Sarvam in real-time
@@ -335,19 +352,19 @@ async def _stream_once(history, queue, interrupt, tools):
                 content = delta.get("content") or ""
                 if not content:
                     continue
-                content = re.sub(r"<function=\w+>.*?</function>", "", content, flags=re.DOTALL)
-                if not content.strip():
-                    continue
                 text += content
                 buffer += content
                 sentences, buffer = flush_sentences(buffer)
                 for s in sentences:
                     if interrupt.is_set():
                         break
-                    await queue.put(s)
-    if buffer.strip() and not interrupt.is_set():
-        await queue.put(buffer.strip())
-    return text, [calls[i] for i in sorted(calls)]
+                    s = strip_fn_tags(s)
+                    if s.strip():
+                        await queue.put(s)
+    tail = strip_fn_tags(buffer).strip()
+    if tail and not interrupt.is_set():
+        await queue.put(tail)
+    return strip_fn_tags(text), [calls[i] for i in sorted(calls)]
 
 
 async def stream_llm_producer(history: list, queue: asyncio.Queue, interrupt: asyncio.Event,
