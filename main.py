@@ -299,6 +299,12 @@ async def websocket_endpoint(ws: WebSocket):
 MAX_HOPS = 4  # ponytail: fixed hop cap; raise only if a real multi-tool flow needs it
 
 
+def normalize_args(args: str) -> str:
+    # Llama 3.3 emits literal `null` (or nothing) for no-arg tools; both mean {}.
+    # Without this, json.loads gives None -> **None throws -> wasted error hop.
+    return "{}" if args.strip() in ("", "null") else args
+
+
 def accumulate_tool_calls(acc: dict, deltas: list) -> None:
     """Merge one chunk's tool_call deltas into acc {index: {id, name, args}}.
     Name arrives whole; arguments arrive fragmented across chunks."""
@@ -364,6 +370,8 @@ async def _stream_once(history, queue, interrupt, tools):
     tail = strip_fn_tags(buffer).strip()
     if tail and not interrupt.is_set():
         await queue.put(tail)
+    for tc in calls.values():
+        tc["args"] = normalize_args(tc["args"])
     return strip_fn_tags(text), [calls[i] for i in sorted(calls)]
 
 
