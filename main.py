@@ -31,6 +31,9 @@ SARVAM_API_KEY      = os.getenv("SARVAM_API_KEY")
 ELEVENLABS_API_KEY  = os.getenv("ELEVENLABS_API_KEY")
 GROQ_API_KEY        = os.getenv("GROQ_API_KEY")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "bajNon13EdhNMndG3z05")
+ELEVENLABS_MODEL    = os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5")
+# language_code enforcement only exists on these models; others 400 on the param
+ELEVENLABS_LANG_MODELS = {"eleven_flash_v2_5", "eleven_turbo_v2_5"}
 
 SARVAM_STT_WS = "wss://api.sarvam.ai/speech-to-text/ws"
 
@@ -101,7 +104,7 @@ async def sarvam_reader(sarvam_ws, transcript_queue: asyncio.Queue):
             if data.get("type") == "data":
                 transcript = data.get("data", {}).get("transcript", "")
                 if transcript:
-                    await transcript_queue.put(transcript)
+                    await transcript_queue.put((transcript, data.get("data", {}).get("language_code", "")))
     except Exception as e:
         print(f"Sarvam reader closed: {e}")
 
@@ -131,7 +134,7 @@ async def websocket_endpoint(ws: WebSocket):
     sarvam_ws   = None
     reader_task = None
 
-    async def run_turn(transcript: str) -> None:
+    async def run_turn(transcript: str, tts_lang: str = "") -> None:
         if not transcript.strip():
             await ws.send_json({"type": "error", "text": "Samajh nahi aaya, dobara bolo."})
             await ws.send_json({"type": "ready"})
@@ -146,7 +149,7 @@ async def websocket_endpoint(ws: WebSocket):
         results = await asyncio.gather(
             stream_llm_producer(conversation_history, sentence_queue, interrupt_event,
                                 active_tools, account, ws, exec_tool),
-            tts_consumer(sentence_queue, ws, voice_id, interrupt_event),
+            tts_consumer(sentence_queue, ws, voice_id, interrupt_event, tts_lang),
             return_exceptions=True,
         )
         full_text  = results[0] if isinstance(results[0], str) else ""
@@ -217,9 +220,9 @@ async def websocket_endpoint(ws: WebSocket):
                     await sarvam_ws.send(json.dumps({"type": "flush"}))
 
                     try:
-                        transcript = await asyncio.wait_for(transcript_queue.get(), timeout=10.0)
+                        transcript, detected_lang = await asyncio.wait_for(transcript_queue.get(), timeout=10.0)
                     except asyncio.TimeoutError:
-                        transcript = ""
+                        transcript, detected_lang = "", ""
 
                     reader_task.cancel()
                     await sarvam_ws.close()
@@ -237,7 +240,7 @@ async def websocket_endpoint(ws: WebSocket):
                         except (asyncio.CancelledError, Exception): pass
 
                     interrupt_event.clear()
-                    active_turn = asyncio.create_task(run_turn(transcript))
+                    active_turn = asyncio.create_task(run_turn(transcript, detected_lang))
                     active_turn.add_done_callback(on_turn_done)
 
                 elif data.get("type") == "speech_cancel":
@@ -305,6 +308,21 @@ def normalize_args(args: str) -> str:
     return "{}" if args.strip() in ("", "null") else args
 
 
+def salvage_failed_tool_call(err_body: str):
+    """Groq 400s with code tool_use_failed when Llama emits a malformed raw-text
+    tool call (e.g. `<function=recent_transactions[]{"n": "3"}</function>`).
+    Recover name+args from the error's failed_generation so the turn proceeds
+    instead of going silent. Returns a call dict or None."""
+    try:
+        failed = json.loads(err_body)["error"]["failed_generation"]
+    except Exception:
+        return None
+    m = re.search(r"<function=(\w+)[^{<]*(\{.*?\})?\s*(?:</function>|$)", failed, re.DOTALL)
+    if not m:
+        return None
+    return {"id": "salvaged_0", "name": m.group(1), "args": normalize_args(m.group(2) or "")}
+
+
 def accumulate_tool_calls(acc: dict, deltas: list) -> None:
     """Merge one chunk's tool_call deltas into acc {index: {id, name, args}}.
     Name arrives whole; arguments arrive fragmented across chunks."""
@@ -344,6 +362,13 @@ async def _stream_once(history, queue, interrupt, tools):
             },
             json=body,
         ) as resp:
+            if resp.status_code != 200:
+                err = (await resp.aread()).decode(errors="replace")
+                call = salvage_failed_tool_call(err)
+                if call:
+                    print(f"[SALVAGED] raw tool call from Groq {resp.status_code}: {call['name']}({call['args']})")
+                    return "", [call]
+                raise RuntimeError(f"Groq {resp.status_code}: {err[:300]}")
             async for line in resp.aiter_lines():
                 if interrupt.is_set():
                     break
@@ -404,8 +429,15 @@ async def stream_llm_producer(history: list, queue: asyncio.Queue, interrupt: as
     return full_text
 
 
-async def tts_consumer(queue: asyncio.Queue, ws: WebSocket, vid: str, interrupt: asyncio.Event) -> bool:
+async def tts_consumer(queue: asyncio.Queue, ws: WebSocket, vid: str, interrupt: asyncio.Event,
+                       lang_code: str = "") -> bool:
     vid = vid or ELEVENLABS_VOICE_ID
+    tts_body = {
+        "model_id": ELEVENLABS_MODEL,
+        "voice_settings": {"stability": 0.7, "similarity_boost": 0.75},
+    }
+    if lang_code and ELEVENLABS_MODEL in ELEVENLABS_LANG_MODELS:
+        tts_body["language_code"] = lang_code.split("-")[0]   # Sarvam "hi-IN" → ISO 639-1 "hi"
     audio_sent = False
     while True:
         sentence = await queue.get()
@@ -429,11 +461,7 @@ async def tts_consumer(queue: asyncio.Queue, ws: WebSocket, vid: str, interrupt:
                         "xi-api-key": ELEVENLABS_API_KEY,
                         "Content-Type": "application/json",
                     },
-                    json={
-                        "text": sentence,
-                        "model_id": "eleven_flash_v2_5",
-                        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
-                    },
+                    json={"text": sentence, **tts_body},
                 ) as resp:
                     resp.raise_for_status()
                     audio_data = b""
