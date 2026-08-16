@@ -82,7 +82,7 @@ docs/                 Telecom agent design: journey map, intent-tool matrix,
 Requires Python 3.11+ and API keys for Sarvam AI, Groq, and ElevenLabs.
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/tiwariharshvardhan/Voice-Agent.git
 cd voice-agent
 pip install -r requirements.txt
 ```
