@@ -31,7 +31,7 @@ SARVAM_API_KEY      = os.getenv("SARVAM_API_KEY")
 ELEVENLABS_API_KEY  = os.getenv("ELEVENLABS_API_KEY")
 GROQ_API_KEY        = os.getenv("GROQ_API_KEY")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "bajNon13EdhNMndG3z05")
-ELEVENLABS_MODEL    = os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5")
+ELEVENLABS_MODEL    = os.getenv("ELEVENLABS_MODEL", "eleven_turbo_v2_5")
 # language_code enforcement only exists on these models; others 400 on the param
 ELEVENLABS_LANG_MODELS = {"eleven_flash_v2_5", "eleven_turbo_v2_5"}
 
@@ -344,7 +344,7 @@ async def _stream_once(history, queue, interrupt, tools):
     buffer = ""
     calls: dict = {}
     body = {
-        "model": "llama-3.3-70b-versatile",
+        "model": "openai/gpt-oss-120b",
         "messages": history,
         "max_tokens": 600,
         "stream": True,

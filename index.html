@@ -1371,17 +1371,17 @@ function vadLoop() {
 
     if (isAgentSpeaking) {
       volBar.style.width = "0%";
-      // sustained speech (~8 net frames) fires barge-in. Leaky counter: dips between
+      // sustained speech (~12 net frames) fires barge-in. Leaky counter: dips between
       // syllables lose progress slowly instead of resetting — AEC attenuates the mic
       // during double-talk, so demand less than normal speech detection.
       // AEC already removes the agent's own voice from the mic during playback, so
-      // sustained energy above the noise floor is the user. The 8-frame sustain is
+      // sustained energy above the noise floor is the user. The 12-frame sustain is
       // the false-positive guard — don't also demand extra loudness.
       const bargeNeed = dynamicThreshold * 1.05;
       interruptFrames = rms > bargeNeed ? interruptFrames + 1 : Math.max(0, interruptFrames - 1);
       if (bargeDebugFrame++ % 30 === 0)
-        console.debug(`[barge-in] rms=${rms.toFixed(4)} need>${bargeNeed.toFixed(4)} frames=${interruptFrames}/8`);
-      if (interruptFrames >= 8) {
+        console.debug(`[barge-in] rms=${rms.toFixed(4)} need>${bargeNeed.toFixed(4)} frames=${interruptFrames}/12`);
+      if (interruptFrames >= 12) {
         interruptFrames = 0;
         console.debug("[barge-in] FIRED — stopping agent audio");
         handleInterrupt();
