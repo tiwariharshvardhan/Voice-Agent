@@ -27,7 +27,7 @@ Mic
          ├─ speech_start -> backend opens Sarvam WS (per-utterance)
          ├─ PCM chunks -> base64 -> Sarvam
          └─ speech_end  -> flush -> transcript + detected language
-             └─ Groq Llama 3.3 70B (streaming, tool calling, max 4 hops)
+             └─ Groq - GPT-OSS 120B (streaming, tool calling, max 4 hops)
                  └─ sentences -> ElevenLabs Flash v2.5 (per-sentence)
                      └─ binary audio -> browser playback queue
 
@@ -39,7 +39,7 @@ via a playback generation counter.
 Design choices worth knowing:
 
 - **Per-utterance STT connections.** Sarvam closes idle WebSockets within seconds, so a connection is opened on speech start rather than held open. Config travels in URL query parameters, not a JSON handshake.
-- **Tool-call salvage.** Llama 3.3 intermittently emits tool calls as malformed raw text, which Groq rejects with a 400. The server parses the intended call out of the error's `failed_generation` and executes it anyway, so the turn never goes silent.
+- **Tool-call salvage.** The model intermittently emits tool calls as malformed raw text, which Groq rejects with a 400. The server parses the intended call out of the error's `failed_generation` and executes it anyway, so the turn never goes silent.
 - **Interrupt rollback is turn-scoped.** A tool turn appends multiple messages to history; on interrupt the whole turn is sliced off so history never ends on a dangling tool message.
 - **Per-connection state.** Each WebSocket session gets a deep copy of the demo account data - sessions never share state.
 
@@ -50,7 +50,7 @@ Design choices worth knowing:
 | Backend | FastAPI + WebSockets (Python) |
 | Frontend | Single-page `index.html`, no framework, no build step |
 | STT | Sarvam AI Saaras v3 (WebSocket streaming) |
-| LLM | Groq - Llama 3.3 70B (streaming + tool calling) |
+| LLM | Groq - GPT-OSS 120B (streaming + tool calling) |
 | TTS | ElevenLabs Flash v2.5 (per-sentence streaming) |
 
 ## Performance
