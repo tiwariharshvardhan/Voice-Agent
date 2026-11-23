@@ -2,9 +2,8 @@
 __pycache__/
 voice-sandwich-demo/
 .DS_Store
-handoff.md
-handoff-1.md
+handoffs/
 PRD-tool-calling.md
-handoff-2.md
-handoff-3.md
 PRODUCT_MAP.md
+eval_tools.py
+test_tools.py
