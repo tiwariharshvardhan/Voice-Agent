@@ -114,70 +114,173 @@ async def get():
     return HTMLResponse(open("index.html").read())
 
 
-@app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
-    await ws.accept()
-    print("Client connected")
+def _on_turn_done(task) -> None:
+    try:
+        task.result()
+    except (asyncio.CancelledError, Exception):
+        pass
 
-    conversation_history = [{"role": "system", "content": SYSTEM_PROMPT}]
-    voice_id        = ELEVENLABS_VOICE_ID
-    system_prompt   = SYSTEM_PROMPT
-    language_code   = "unknown"
-    active_turn     = None
-    active_tools    = None
-    account         = None            # per-connection state — sessions never share
-    exec_tool       = None
-    interrupt_event = asyncio.Event()
-    transcript_queue = asyncio.Queue()
 
-    # Sarvam WS opened per-utterance on speech_start (avoids idle timeout)
-    sarvam_ws   = None
-    reader_task = None
+class Session:
+    """One voice conversation. `transport` is anything exposing send_json /
+    send_bytes — a browser WebSocket today, a phone-leg shim later."""
 
-    async def run_turn(transcript: str, tts_lang: str = "") -> None:
+    def __init__(self, transport):
+        self.transport        = transport
+        self.system_prompt    = SYSTEM_PROMPT
+        self.history          = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.voice_id         = ELEVENLABS_VOICE_ID
+        self.language_code    = "unknown"
+        self.active_tools     = None
+        self.account          = None      # per-connection — sessions never share
+        self.exec_tool        = None
+        self.active_turn      = None
+        self.interrupt_event  = asyncio.Event()
+        self.transcript_queue = asyncio.Queue()
+        # Sarvam WS opened per-utterance on speech_start (avoids idle timeout)
+        self.sarvam_ws        = None
+        self.reader_task      = None
+
+    async def apply_settings(self, data: dict) -> None:
+        self.language_code = data.get("language_code", self.language_code)
+        self.voice_id      = data.get("voice_id", self.voice_id)
+        self.system_prompt = data.get("system_prompt", self.system_prompt)
+        toolset = TOOLSETS.get(data.get("tools"))
+        self.active_tools, self.account, self.exec_tool = (
+            (toolset[0], toolset[1](), toolset[2]) if toolset else (None, None, None))
+        self.history = [{"role": "system", "content": self.system_prompt}]
+        print(f"Settings updated — voice: {self.voice_id}, lang: {self.language_code}, tools: {data.get('tools') or 'none'}")
+        await self.transport.send_json({"type": "settings_ack"})
+
+    async def on_speech_start(self) -> None:
+        print("STT stream starting")
+        while not self.transcript_queue.empty():
+            self.transcript_queue.get_nowait()
+        try:
+            self.sarvam_ws   = await connect_sarvam_ws(self.language_code)
+            self.reader_task = asyncio.create_task(sarvam_reader(self.sarvam_ws, self.transcript_queue))
+        except Exception as e:
+            # STT unreachable must not kill the session — report and keep listening
+            print(f"Sarvam connect failed: {e}")
+            self.sarvam_ws, self.reader_task = None, None
+            await self.transport.send_json({"type": "error", "text": "Awaaz seva mein dikkat hai, dobara bolo."})
+            await self.transport.send_json({"type": "ready"})
+
+    async def on_speech_end(self) -> None:
+        if self.sarvam_ws is None:   # connect failed at speech_start
+            await self.transport.send_json({"type": "ready"})
+            return
+        print("STT stream ending — flushing Sarvam")
+        await self.sarvam_ws.send(json.dumps({"type": "flush"}))
+
+        try:
+            transcript, detected_lang = await asyncio.wait_for(self.transcript_queue.get(), timeout=10.0)
+        except asyncio.TimeoutError:
+            transcript, detected_lang = "", ""
+
+        self.reader_task.cancel()
+        await self.sarvam_ws.close()
+        self.sarvam_ws = None
+
+        if not transcript:
+            await self.transport.send_json({"type": "error", "text": "Samajh nahi aaya, dobara bolo."})
+            await self.transport.send_json({"type": "ready"})
+            return
+
+        await self.start_turn(transcript, detected_lang)
+
+    async def on_speech_cancel(self) -> None:
+        print("STT cancelled (too short)")
+        if self.reader_task:
+            self.reader_task.cancel()
+        if self.sarvam_ws:
+            await self.sarvam_ws.close()
+            self.sarvam_ws = None
+        while not self.transcript_queue.empty():
+            self.transcript_queue.get_nowait()
+        await self.transport.send_json({"type": "ready"})
+
+    async def on_interrupt(self) -> None:
+        print("Interrupt received")
+        if self.active_turn and not self.active_turn.done():
+            self.interrupt_event.set()
+
+    async def feed_audio(self, pcm: bytes) -> None:
+        if not pcm or self.sarvam_ws is None:
+            return
+        audio_b64 = base64.b64encode(pcm).decode()
+        await self.sarvam_ws.send(json.dumps({
+            "audio": {"data": audio_b64, "sample_rate": 16000, "encoding": "audio/wav"},
+        }))
+
+    async def start_turn(self, transcript: str, tts_lang: str = "") -> None:
+        """Cancel any in-flight turn, then run this one in the background."""
+        if self.active_turn and not self.active_turn.done():
+            self.interrupt_event.set()
+            self.active_turn.cancel()
+            try: await self.active_turn
+            except (asyncio.CancelledError, Exception): pass
+
+        self.interrupt_event.clear()
+        self.active_turn = asyncio.create_task(self.run_turn(transcript, tts_lang))
+        self.active_turn.add_done_callback(_on_turn_done)
+
+    async def run_turn(self, transcript: str, tts_lang: str = "") -> None:
         if not transcript.strip():
-            await ws.send_json({"type": "error", "text": "Samajh nahi aaya, dobara bolo."})
-            await ws.send_json({"type": "ready"})
+            await self.transport.send_json({"type": "error", "text": "Samajh nahi aaya, dobara bolo."})
+            await self.transport.send_json({"type": "ready"})
             return
 
         print(f"[USER] {transcript}")
-        await ws.send_json({"type": "user_transcript", "text": transcript})
-        turn_start = len(conversation_history)
-        conversation_history.append({"role": "user", "content": transcript})
+        await self.transport.send_json({"type": "user_transcript", "text": transcript})
+        turn_start = len(self.history)
+        self.history.append({"role": "user", "content": transcript})
 
         sentence_queue: asyncio.Queue = asyncio.Queue(maxsize=5)
         results = await asyncio.gather(
-            stream_llm_producer(conversation_history, sentence_queue, interrupt_event,
-                                active_tools, account, ws, exec_tool),
-            tts_consumer(sentence_queue, ws, voice_id, interrupt_event, tts_lang),
+            stream_llm_producer(self.history, sentence_queue, self.interrupt_event,
+                                self.active_tools, self.account, self.transport, self.exec_tool),
+            tts_consumer(sentence_queue, self.transport, self.voice_id, self.interrupt_event, tts_lang),
             return_exceptions=True,
         )
         full_text  = results[0] if isinstance(results[0], str) else ""
         audio_sent = results[1] if isinstance(results[1], bool) else False
 
-        if interrupt_event.is_set():
+        if self.interrupt_event.is_set():
             print(f"[INTERRUPTED] {full_text[:60]}")
             # Drop the whole turn — including any tool-call/tool messages the
             # hop-loop appended — so history never ends on a dangling tool msg.
-            del conversation_history[turn_start:]
-            await ws.send_json({"type": "interrupted"})
+            del self.history[turn_start:]
+            await self.transport.send_json({"type": "interrupted"})
             return
 
         if full_text:
-            conversation_history.append({"role": "assistant", "content": full_text})
+            self.history.append({"role": "assistant", "content": full_text})
         print(f"[AGENT] {full_text}")
-        await ws.send_json({"type": "agent_transcript", "text": full_text})
+        await self.transport.send_json({"type": "agent_transcript", "text": full_text})
 
         if audio_sent:
-            await ws.send_json({"type": "tts_end"})
+            await self.transport.send_json({"type": "tts_end"})
         else:
-            await ws.send_json({"type": "tts_fallback", "text": full_text})
+            await self.transport.send_json({"type": "tts_fallback", "text": full_text})
 
-    def on_turn_done(task) -> None:
-        try:
-            task.result()
-        except (asyncio.CancelledError, Exception):
-            pass
+    async def close(self) -> None:
+        if self.active_turn and not self.active_turn.done():
+            self.active_turn.cancel()
+        if self.reader_task:
+            self.reader_task.cancel()
+        if self.sarvam_ws:
+            try:
+                await self.sarvam_ws.close()
+            except Exception:
+                pass
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    await ws.accept()
+    print("Client connected")
+    session = Session(ws)
 
     try:
         while True:
@@ -185,118 +288,39 @@ async def websocket_endpoint(ws: WebSocket):
 
             if "text" in msg:
                 data = json.loads(msg["text"])
+                msg_type = data.get("type")
 
-                if data.get("type") == "settings":
-                    language_code = data.get("language_code", language_code)
-                    voice_id      = data.get("voice_id", voice_id)
-                    system_prompt = data.get("system_prompt", system_prompt)
-                    toolset = TOOLSETS.get(data.get("tools"))
-                    active_tools, account, exec_tool = (
-                        (toolset[0], toolset[1](), toolset[2]) if toolset else (None, None, None))
-                    conversation_history = [{"role": "system", "content": system_prompt}]
-                    print(f"Settings updated — voice: {voice_id}, lang: {language_code}, tools: {data.get('tools') or 'none'}")
-                    await ws.send_json({"type": "settings_ack"})
-
-                elif data.get("type") == "speech_start":
-                    print("STT stream starting")
-                    while not transcript_queue.empty():
-                        transcript_queue.get_nowait()
-                    # Open fresh Sarvam WS per utterance — avoids idle timeout
-                    try:
-                        sarvam_ws   = await connect_sarvam_ws(language_code)
-                        reader_task = asyncio.create_task(sarvam_reader(sarvam_ws, transcript_queue))
-                    except Exception as e:
-                        # STT unreachable must not kill the session — report and keep listening
-                        print(f"Sarvam connect failed: {e}")
-                        sarvam_ws, reader_task = None, None
-                        await ws.send_json({"type": "error", "text": "Awaaz seva mein dikkat hai, dobara bolo."})
-                        await ws.send_json({"type": "ready"})
-
-                elif data.get("type") == "speech_end":
-                    if sarvam_ws is None:   # connect failed at speech_start
-                        await ws.send_json({"type": "ready"})
-                        continue
-                    print("STT stream ending — flushing Sarvam")
-                    await sarvam_ws.send(json.dumps({"type": "flush"}))
-
-                    try:
-                        transcript, detected_lang = await asyncio.wait_for(transcript_queue.get(), timeout=10.0)
-                    except asyncio.TimeoutError:
-                        transcript, detected_lang = "", ""
-
-                    reader_task.cancel()
-                    await sarvam_ws.close()
-                    sarvam_ws = None
-
-                    if not transcript:
-                        await ws.send_json({"type": "error", "text": "Samajh nahi aaya, dobara bolo."})
-                        await ws.send_json({"type": "ready"})
-                        continue
-
-                    if active_turn and not active_turn.done():
-                        interrupt_event.set()
-                        active_turn.cancel()
-                        try: await active_turn
-                        except (asyncio.CancelledError, Exception): pass
-
-                    interrupt_event.clear()
-                    active_turn = asyncio.create_task(run_turn(transcript, detected_lang))
-                    active_turn.add_done_callback(on_turn_done)
-
-                elif data.get("type") == "speech_cancel":
-                    print("STT cancelled (too short)")
-                    if reader_task:
-                        reader_task.cancel()
-                    if sarvam_ws:
-                        await sarvam_ws.close()
-                        sarvam_ws = None
-                    while not transcript_queue.empty():
-                        transcript_queue.get_nowait()
-                    await ws.send_json({"type": "ready"})
-
-                elif data.get("type") == "interrupt":
-                    print("Interrupt received")
-                    if active_turn and not active_turn.done():
-                        interrupt_event.set()
-
+                if msg_type == "settings":
+                    await session.apply_settings(data)
+                elif msg_type == "speech_start":
+                    await session.on_speech_start()
+                elif msg_type == "speech_end":
+                    await session.on_speech_end()
+                elif msg_type == "speech_cancel":
+                    await session.on_speech_cancel()
+                elif msg_type == "interrupt":
+                    await session.on_interrupt()
                 continue
 
-            if "bytes" not in msg or not msg["bytes"] or sarvam_ws is None:
-                continue
-
-            # Binary PCM chunk — forward to Sarvam in real-time
-            audio_b64 = base64.b64encode(msg["bytes"]).decode()
-            await sarvam_ws.send(json.dumps({
-                "audio": {"data": audio_b64, "sample_rate": 16000, "encoding": "audio/wav"},
-            }))
+            if "bytes" in msg and msg["bytes"]:
+                await session.feed_audio(msg["bytes"])
 
     except WebSocketDisconnect:
         print("Client disconnected")
-        if active_turn and not active_turn.done():
-            active_turn.cancel()
     except RuntimeError as e:
         if "disconnect" in str(e).lower():
             print("Client disconnected mid-session")
         else:
             print(f"Runtime error: {e}")
-        if active_turn and not active_turn.done():
-            active_turn.cancel()
     except Exception as e:
         print(f"Unhandled error: {e}")
-        if active_turn and not active_turn.done():
-            active_turn.cancel()
         try:
             await ws.send_json({"type": "error", "text": str(e)})
         except Exception:
             pass
     finally:
-        if reader_task:
-            reader_task.cancel()
-        if sarvam_ws:
-            try:
-                await sarvam_ws.close()
-            except Exception:
-                pass
+        await session.close()
+
 
 
 MAX_HOPS = 4  # ponytail: fixed hop cap; raise only if a real multi-tool flow needs it
@@ -401,7 +425,7 @@ async def _stream_once(history, queue, interrupt, tools):
 
 
 async def stream_llm_producer(history: list, queue: asyncio.Queue, interrupt: asyncio.Event,
-                              tools=None, account=None, ws=None, exec_tool=None) -> str:
+                              tools=None, account=None, transport=None, exec_tool=None) -> str:
     full_text = ""
     try:
         for _ in range(MAX_HOPS):
@@ -417,8 +441,8 @@ async def stream_llm_producer(history: list, queue: asyncio.Queue, interrupt: as
             for tc in tool_calls:
                 result = exec_tool(tc["name"], tc["args"], account)
                 print(f"[TOOL] {tc['name']}({tc['args']}) -> {result}")
-                if ws is not None:
-                    await ws.send_json({"type": "tool_call", "name": tc["name"], "result": result})
+                if transport is not None:
+                    await transport.send_json({"type": "tool_call", "name": tc["name"], "result": result})
                 history.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
     except asyncio.CancelledError:
         pass
@@ -429,7 +453,7 @@ async def stream_llm_producer(history: list, queue: asyncio.Queue, interrupt: as
     return full_text
 
 
-async def tts_consumer(queue: asyncio.Queue, ws: WebSocket, vid: str, interrupt: asyncio.Event,
+async def tts_consumer(queue: asyncio.Queue, transport, vid: str, interrupt: asyncio.Event,
                        lang_code: str = "") -> bool:
     vid = vid or ELEVENLABS_VOICE_ID
     tts_body = {
@@ -471,7 +495,7 @@ async def tts_consumer(queue: asyncio.Queue, ws: WebSocket, vid: str, interrupt:
                         if chunk:
                             audio_data += chunk
                     if audio_data and not interrupt.is_set():
-                        await ws.send_bytes(audio_data)
+                        await transport.send_bytes(audio_data)
                         audio_sent = True
         except asyncio.CancelledError:
             break
