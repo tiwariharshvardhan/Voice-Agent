@@ -35,7 +35,8 @@ ELEVENLABS_MODEL    = os.getenv("ELEVENLABS_MODEL", "eleven_turbo_v2_5")
 # language_code enforcement only exists on these models; others 400 on the param
 ELEVENLABS_LANG_MODELS = {"eleven_flash_v2_5", "eleven_turbo_v2_5"}
 
-SARVAM_STT_WS = "wss://api.sarvam.ai/speech-to-text/ws"
+SARVAM_STT_WS = "wss://api.sarvam.ai/speech-to-text-realtime/ws"
+SARVAM_MODEL  = os.getenv("SARVAM_MODEL", "saaras:v4")   # saaras:v3-realtime to fall back
 
 DEBUG = os.getenv("SARVAM_DEBUG") == "1"   # set SARVAM_DEBUG=1 to log the full Sarvam wire traffic
 
@@ -79,17 +80,22 @@ def flush_sentences(buffer: str) -> tuple[list[str], str]:
     return sentences, buffer
 
 
-async def connect_sarvam_ws(language_code: str):
-    """Open a Sarvam STT WebSocket with config in URL params."""
+async def connect_sarvam_ws(language_code: str, endpointing: str = "manual",
+                            encoding: str = "linear16", sample_rate: int = 16000):
+    """Open a Sarvam realtime STT WebSocket. Config goes in URL params.
+
+    endpointing="manual" — we delimit turns with speech_start/speech_end.
+    endpointing="vad"    — Sarvam finds turn boundaries and emits vad.speech_*.
+    """
     params = {
-        "model": "saaras:v3",
+        "model": SARVAM_MODEL,
         "mode": "transcribe",
-        "sample_rate": "16000",
-        "input_audio_codec": "pcm_s16le",
-        "flush_signal": "true",
+        "endpointing": endpointing,
+        "encoding": encoding,
+        "sample_rate": str(sample_rate),
+        # realtime wants an explicit "auto"; the legacy WS required omitting it
+        "language_code": language_code if language_code and language_code != "unknown" else "auto",
     }
-    if language_code and language_code != "unknown":
-        params["language-code"] = language_code
     url = f"{SARVAM_STT_WS}?{urlencode(params)}"
     if DEBUG: print(f"Connecting to Sarvam: {url}")
     return await ws_connect(url, additional_headers={"api-subscription-key": SARVAM_API_KEY}, ssl=SSL_CTX)
@@ -101,10 +107,17 @@ async def sarvam_reader(sarvam_ws, transcript_queue: asyncio.Queue):
         async for msg in sarvam_ws:
             data = json.loads(msg)
             if DEBUG: print(f"Sarvam msg: {data}")
-            if data.get("type") == "data":
-                transcript = data.get("data", {}).get("transcript", "")
-                if transcript:
-                    await transcript_queue.put((transcript, data.get("data", {}).get("language_code", "")))
+            event = data.get("event")
+            if event == "transcript.final":
+                # Queue it even when `text` is empty: an empty final is Sarvam
+                # saying "nothing there", and dropping it left on_speech_end
+                # waiting out its 10s timeout — 10s of dead air on a mishear.
+                # Assumes one final per manual turn, which is what the queue
+                # being cleared at speech_start has always assumed.
+                # `language` is only present when language_code=auto
+                await transcript_queue.put((data.get("text", ""), data.get("language", "")))
+            elif event == "error":
+                print(f"Sarvam error [{data.get('code')}] fatal={data.get('is_fatal')}: {data.get('message')}")
     except Exception as e:
         print(f"Sarvam reader closed: {e}")
 
@@ -159,6 +172,7 @@ class Session:
         try:
             self.sarvam_ws   = await connect_sarvam_ws(self.language_code)
             self.reader_task = asyncio.create_task(sarvam_reader(self.sarvam_ws, self.transcript_queue))
+            await self.sarvam_ws.send(json.dumps({"event": "speech_start"}))
         except Exception as e:
             # STT unreachable must not kill the session — report and keep listening
             print(f"Sarvam connect failed: {e}")
@@ -170,8 +184,8 @@ class Session:
         if self.sarvam_ws is None:   # connect failed at speech_start
             await self.transport.send_json({"type": "ready"})
             return
-        print("STT stream ending — flushing Sarvam")
-        await self.sarvam_ws.send(json.dumps({"type": "flush"}))
+        print("STT stream ending — closing turn")
+        await self.sarvam_ws.send(json.dumps({"event": "speech_end"}))
 
         try:
             transcript, detected_lang = await asyncio.wait_for(self.transcript_queue.get(), timeout=10.0)
@@ -209,9 +223,7 @@ class Session:
         if not pcm or self.sarvam_ws is None:
             return
         audio_b64 = base64.b64encode(pcm).decode()
-        await self.sarvam_ws.send(json.dumps({
-            "audio": {"data": audio_b64, "sample_rate": 16000, "encoding": "audio/wav"},
-        }))
+        await self.sarvam_ws.send(json.dumps({"event": "audio_input", "audio": audio_b64}))
 
     async def start_turn(self, transcript: str, tts_lang: str = "") -> None:
         """Cancel any in-flight turn, then run this one in the background."""
