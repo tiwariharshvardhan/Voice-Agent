@@ -5,6 +5,50 @@
 
 ---
 
+## 0. Status (2026-11-25)
+
+**The inbound leg is built and works end to end**, verified without a phone by
+synthesizing A-law speech with ElevenLabs and playing it into `/ws/phone` as
+VoiceLink would.
+
+Built: `PhoneTransport`, `POST /voicelink/inbound`, `POST /voicelink/webhook`,
+`WS /ws/phone`, VAD-driven turns, agent-speaks-first greeting, A-law TTS output,
+and `telecom_tools.SYSTEM_PROMPT` (the persona, server-side at last).
+
+Measured on that test:
+
+| | |
+|---|---|
+| greeting, time to first audio | **0.96 s** |
+| reply, after the caller stops speaking | **2.78 s** |
+| full turn | transcript → `get_account` → spoken answer, correct |
+
+The 2.78 s includes Sarvam's `silence_duration_ms` (default **1000 ms**) spent
+waiting to be sure the caller finished — so ~1.8 s is actual work. That knob is
+the cheapest latency lever available and is changeable mid-session.
+
+**Not built:** outbound (`add_lead`), abuse controls (3.10), the call-me form
+(3.11). **Not possible yet:** a real call — needs KYC and a DID.
+
+### Found while testing, worth fixing
+
+1. **gpt-oss invents arguments for no-arg tools.** Saw
+   `get_account({"n":1})` → `error: invalid tool or arguments`, then a retry
+   with `{}`. The hop-loop self-corrects, but it costs a round trip mid-call.
+   Intermittent (1 of 2 runs). Making dispatch ignore unknown kwargs kills it.
+2. **Money read wrong.** `₹12.5` was spoken as "do point five rupees" — the 12
+   became "do". A prompt or tool-format issue, and it's the single worst class
+   of error for a telecom bot.
+3. **Dates leak their punctuation.** `2026-08-14` became "twenty twenty six
+   dash fourteen August". The tool returns ISO dates and the prompt's
+   no-special-characters rule does not survive the tool result.
+4. **STT hallucinated on synthetic silence** — appended "साया हमारा नासोहा।" to
+   a correct transcript. Probably an artifact of feeding a constant A-law
+   silence byte; real carrier lines carry comfort noise. Watch for it on a real
+   call before treating it as a bug.
+
+---
+
 ## 1. The core insight
 
 The voice pipeline is provider-agnostic already. `connect_sarvam_ws`,
@@ -64,19 +108,41 @@ should still pass after it.
 
 ### 3.2 `PhoneTransport` — a shim that looks like a `WebSocket`
 
-This is what keeps the pipeline untouched. `run_turn` and `tts_consumer` only
-ever call `ws.send_json(...)` and `ws.send_bytes(...)`. Give them an object with
-those two methods:
+VoiceLink's protocol is Twilio Media Streams in all but name, so the shim is
+small. `run_turn` and `tts_consumer` only ever call `send_json` / `send_bytes`.
 
-- `send_json(msg)` — `user_transcript`, `agent_transcript`, `tool_call`,
-  `ready`, `tts_end`, `tts_fallback` have no meaning on a phone leg → log them.
-  `interrupted` → send the provider's **clear/flush** event (see 3.5).
-- `send_bytes(audio)` — slice into 20 ms frames, base64, wrap in the provider's
-  media envelope, and **pace** the sending. Drop its own queue on interrupt.
+**VoiceLink → us** (JSON text frames):
+```
+{"event":"connected"}
+{"event":"start","sequence_number":0,"stream_sid":"stream_abc123",
+ "start":{"stream_sid":"…","call_sid":"…","account_sid":"42",
+          "from":"+14155550100","to":"+14155550199",
+          "custom_parameters":{…},
+          "media_format":{"encoding":"audio/alaw","sample_rate":"8000"}}}
+{"event":"media","media":{"track":"inbound","payload":"<base64>"}}
+{"event":"stop","stop":{"callSid":"callabcdef1234"}}
+```
 
-Because the shim owns pacing and dropping, `tts_consumer` keeps buffering whole
-sentences exactly as it does now. **Zero changes to `run_turn`,
-`stream_llm_producer`, `tts_consumer`** beyond 3.4.
+**us → VoiceLink:**
+```
+{"event":"media","media":{"payload":"<base64>"}}
+{"event":"clear","stream_sid":"<stream sid>"}
+{"event":"mark","mark":{"name":"greeting_done"}}
+{"event":"transfer","target":"1234567890"}
+```
+
+So `send_json` maps the browser protocol onto this: `interrupted` → `clear`,
+everything else (`user_transcript`, `tool_call`, `ready`, `tts_end`) → a log
+line. `send_bytes` base64s and wraps in a `media` event, in segments **under
+2 seconds** (VoiceLink's documented guidance; exact chunk size is undocumented).
+
+**Mind the casing.** `start` gives `stream_sid` / `call_sid`; `stop` gives
+`callSid`; `clear` wants `stream_sid`. Read both spellings, don't assume.
+
+**Bonus — `transfer` makes a tool real.** `telecom_tools.transfer_to_human`
+currently only *says* it's transferring. With `{"event":"transfer","target":…}`
+it can actually hand the call to a mobile number. Given the whole ConnectTel
+story is about never reaching a human, that's the strongest beat in the demo.
 
 ### 3.3 Sarvam does the VAD — migrate to the realtime endpoint
 
@@ -142,27 +208,34 @@ real one, and look here first.
 tuned on v3. Auto-detect flips from *omitting* the param to passing `auto` —
 the opposite of the legacy quirk recorded in the handoff.
 
-### 3.4 Audio format — μ-law needs no conversion
+### 3.4 Audio format — A-law, and nothing to convert
 
-**Inbound: nothing to do.** The realtime endpoint accepts `encoding=mulaw`
-(enum: `linear16`, `linear32`, `mulaw`, `alaw`) at `sample_rate=8000`. Carrier
-bytes go straight to Sarvam. No `audioop-lts`, no lookup table, no resampling —
-scratch the Python 3.13 problem entirely. Mono only; frames capped at 16,000
-bytes, and ~100 ms chunks are what the guide suggests.
+**Correction to the earlier plan: VoiceLink is A-law, not μ-law.** The `start`
+event says `media_format.encoding = "audio/alaw"`, `sample_rate = "8000"`.
+(Their overview page also says "raw SLIN" and "PCM" in places — the docs
+contradict themselves, so this needs confirming with VoiceLink.)
 
-**Outbound:** ElevenLabs emits `ulaw_8000` via the `output_format` query param.
-One new argument on `tts_consumer`, since the browser path stays MP3.
+Taking A-law as correct, **both ends still need zero DSP** — verified live
+2026-11-24:
 
-### 3.5 Barge-in must tell the carrier to shut up
+| | result |
+|---|---|
+| Sarvam `encoding=alaw`, `sample_rate=8000` | `session.begin` echoed `encoding=alaw rate=8000` |
+| ElevenLabs `output_format=alaw_8000` | HTTP 200, 2972 bytes |
 
-The one people get wrong. Today an interrupt stops playback *in the browser*. On
-a call, several seconds of audio are already sitting in the carrier's jitter
-buffer — setting `interrupt_event` does nothing to it, and the caller keeps
-hearing the old sentence over their own voice.
+So carrier A-law goes straight into Sarvam, and ElevenLabs emits A-law straight
+back out. No `audioop-lts`, no lookup table, no resampling — the Python 3.13
+problem never materialises. `tts_consumer` needs one `output_format` argument,
+since the browser path stays MP3.
 
-So on interrupt, the transport must send the provider's clear command
-(Twilio: `{"event":"clear"}`; Plivo: `clearAudio`) **and** drop its own pending
-frame queue. This is what 3.2's `interrupted` mapping is for.
+### 3.5 Barge-in — `clear`, and it is documented
+
+Confirmed: `{"event":"clear","stream_sid":"<sid>"}` "discards queued audio not
+yet played". That is exactly the carrier-side flush this item needed, so the
+transport's `interrupted` mapping has a real target.
+
+No acknowledgement event is documented, so treat it as fire-and-forget and drop
+our own pending frame queue at the same time.
 
 ### 3.6 The agent has to speak first
 
@@ -192,13 +265,52 @@ when the WS arrives. Latter is barely more work and keeps the demo flexible.
   expensive or 400s. Needs a cap now, not later.
 - **Call duration cap** — hard limit, or a stuck call bills forever.
 
-### 3.9 Two new HTTP endpoints
+### 3.9 The VoiceLink API — outbound is a lead queue, not a dial
 
-- `POST /call` — takes a number, calls the provider's REST API.
-- `GET /call/answer` — returns the XML that points the carrier at
-  `wss://…/ws/phone`.
+This is the biggest surprise and it changes 3.10 and 3.11.
 
-Plus provider credentials in `.env`, and `requirements.txt` additions.
+**Auth is a login, not a static key.**
+`POST https://app.voicelink.co.in/api/v1/auth/login` with `username` /
+`password` returns `data.access_token` (a Laravel Sanctum token), then
+`Authorization: Bearer {access_token}`. So there's token acquisition and
+refresh to handle — more than dropping a key in `.env`.
+
+**Outbound: `POST /api/v1/add_lead`.**
+Params: `did_number` (mandatory), `customer_number` (**10 digits, no `91` or
+`+91` prefix**), `country_code: "91"`, optional `leads[]` array,
+`websocket_url` and `webhook_url` as **per-call overrides**, `call_limit`.
+
+It responds `"Leads queued successfully"` with `bot_id` / `client_id` /
+`accepted_leads` — **and no call SID.** This is a campaign queue, not a
+request-response dial. To find the resulting call:
+`GET /api/v1/call-log/details?call_id=…`.
+
+**What that means for "visitor clicks, gets a call":** we can't hand the user a
+call id synchronously, and dial timing is the queue's, not ours. The web UI has
+to be fire-and-forget plus webhook-driven status, not a spinner waiting on a
+call object.
+
+**The `websocket_url` per-call override is the useful part** — it carries the
+persona choice (3.7) as a query param, so no server-side call-id registry.
+
+**Inbound is cleaner than outbound.** VoiceLink POSTs per call to a URL of ours
+with `callerId`, `customerNumber`, `callId`, `sid`, and we reply with JSON
+`ws_url` + `webhook_url` (both required). If `ws_url` drops it retries **once**,
+then the call ends `failed`. Dynamic routing per call, no dashboard round-trip.
+
+**Webhooks:** `call.initiated` / `call.answered` / `call.ended` /
+`call.completed`, carrying `callId`, `fromNumber`, `toNumber`, `direction`,
+`callStatus`, `duration`, `recordingUrl`, `customParameters`. Two different
+payload schemas are documented for outbound vs inbound — confirm which applies.
+
+**`recordingUrl` is a free win.** VoiceLink records calls, so the demo
+recordings that were going to be a manual chore arrive as webhook payloads.
+
+**KYC is real but a student can clear it.** Individual: PAN (name-matched) +
+Aadhaar via DigiLocker. GST only for business accounts. DLT is documented only
+for 140/160-series DID purchases (`dlt_confirmed`, `use_case`), not as a blanket
+outbound requirement — but nothing in the docs covers TRAI rules on automated
+calling, so don't read silence as permission.
 
 ### 3.10 Abuse controls — not optional
 
@@ -233,18 +345,17 @@ browser demo, `test_tools.py`, `eval_tools.py`.
 
 ---
 
-## 5. Open decisions (block coding)
+## 5. Open decisions
 
-1. **Which provider** — the envelope format, the clear command, the REST call
-   and the XML dialect are all provider-specific. "voicelink" was mentioned;
-   I don't know it — needs its docs. Everything in §3 is provider-shaped except
-   3.1–3.3, which can start now.
-2. **Inbound or outbound** — inbound (you publish a number) deletes 3.6, 3.9,
-   3.10 and 3.11 outright. Outbound is the more impressive demo and carries all
-   of them.
+1. ~~Which provider~~ — **VoiceLink.** Wire format documented and read
+   (2026-11-24); see 3.2, 3.4, 3.5, 3.9.
+2. ~~Inbound or outbound~~ — **inbound, and it is built** (see §0). Note the
+   plan was wrong that inbound deletes 3.6: a caller who dials and hears
+   silence is worse than one who is greeted, so the greeting was needed anyway.
+   Outbound remains open and is queue-shaped, not instant.
 3. ~~Does Sarvam do endpointing~~ — **answered: yes.** See 3.3.
-
----
+4. **Account state** — is KYC done, is there a DID, is there a trial
+   restriction? Nothing is testable end to end until a number exists.
 
 ## 6. Risks worth knowing
 
@@ -261,3 +372,27 @@ browser demo, `test_tools.py`, `eval_tools.py`.
 - **Concurrency.** Sessions are isolated (`account` is a per-connection
   deepcopy), but Groq / ElevenLabs / Sarvam rate limits and your Railway
   instance size are now shared across simultaneous callers.
+
+---
+
+## 7. Ask VoiceLink before building against this
+
+The docs contradict themselves in places and the full API text file was
+truncated when read, so these are assumptions, not facts:
+
+1. **Audio frame format** — overview says "raw SLIN"/PCM, the `start` event
+   says `audio/alaw`. Which is it, and is it always base64-in-JSON (never
+   binary frames)?
+2. **Chunk size** — only "under 2 seconds" is documented. What is the actual
+   cap per `media` frame?
+3. **Which webhook schema** applies to outbound vs inbound.
+4. **`add_lead` response** — is there any call identifier returned, and what is
+   the field called?
+5. **Concurrency and CPS** — `channel_count` and `call_limit` exist; no maximum
+   is published.
+6. **Trial limits and TRAI/DLT for ordinary outbound** — are there verified-
+   number restrictions, and is DLT needed outside the 140/160 series?
+
+Pages not read yet: the integrations list (Pipecat / LiveKit may document the
+frame format more precisely), plans, the CPS calculator, and the 140/160
+registration process.

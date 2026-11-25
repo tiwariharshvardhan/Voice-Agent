@@ -10,7 +10,7 @@ import httpx
 from websockets.asyncio.client import connect as ws_connect
 
 SSL_CTX = ssl.create_default_context(cafile=certifi.where())
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse
 from dotenv import load_dotenv
 
@@ -37,6 +37,7 @@ ELEVENLABS_LANG_MODELS = {"eleven_flash_v2_5", "eleven_turbo_v2_5"}
 
 SARVAM_STT_WS = "wss://api.sarvam.ai/speech-to-text-realtime/ws"
 SARVAM_MODEL  = os.getenv("SARVAM_MODEL", "saaras:v4")   # saaras:v3-realtime to fall back
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")   # https origin VoiceLink reaches us on
 
 DEBUG = os.getenv("SARVAM_DEBUG") == "1"   # set SARVAM_DEBUG=1 to log the full Sarvam wire traffic
 
@@ -101,8 +102,9 @@ async def connect_sarvam_ws(language_code: str, endpointing: str = "manual",
     return await ws_connect(url, additional_headers={"api-subscription-key": SARVAM_API_KEY}, ssl=SSL_CTX)
 
 
-async def sarvam_reader(sarvam_ws, transcript_queue: asyncio.Queue):
-    """Background task: drain Sarvam responses and push transcripts to queue."""
+async def sarvam_reader(sarvam_ws, transcript_queue: asyncio.Queue, on_vad=None):
+    """Drain Sarvam responses, push transcripts to the queue. `on_vad` is awaited
+    with "vad.speech_start"/"vad.speech_end" — only sent when endpointing=vad."""
     try:
         async for msg in sarvam_ws:
             data = json.loads(msg)
@@ -116,6 +118,9 @@ async def sarvam_reader(sarvam_ws, transcript_queue: asyncio.Queue):
                 # being cleared at speech_start has always assumed.
                 # `language` is only present when language_code=auto
                 await transcript_queue.put((data.get("text", ""), data.get("language", "")))
+            elif event in ("vad.speech_start", "vad.speech_end"):
+                if on_vad is not None:
+                    await on_vad(event)
             elif event == "error":
                 print(f"Sarvam error [{data.get('code')}] fatal={data.get('is_fatal')}: {data.get('message')}")
     except Exception as e:
@@ -143,6 +148,7 @@ class Session:
         self.system_prompt    = SYSTEM_PROMPT
         self.history          = [{"role": "system", "content": SYSTEM_PROMPT}]
         self.voice_id         = ELEVENLABS_VOICE_ID
+        self.tts_format       = ""        # "" = ElevenLabs default (mp3, browser); "alaw_8000" on a call
         self.language_code    = "unknown"
         self.active_tools     = None
         self.account          = None      # per-connection — sessions never share
@@ -165,18 +171,26 @@ class Session:
         print(f"Settings updated — voice: {self.voice_id}, lang: {self.language_code}, tools: {data.get('tools') or 'none'}")
         await self.transport.send_json({"type": "settings_ack"})
 
+    async def open_stt(self, on_vad=None, **kw) -> bool:
+        """Open the Sarvam socket and start its reader. False on failure — STT
+        being unreachable must never kill the session."""
+        try:
+            self.sarvam_ws = await connect_sarvam_ws(self.language_code, **kw)
+        except Exception as e:
+            print(f"Sarvam connect failed: {e}")
+            self.sarvam_ws, self.reader_task = None, None
+            return False
+        self.reader_task = asyncio.create_task(
+            sarvam_reader(self.sarvam_ws, self.transcript_queue, on_vad))
+        return True
+
     async def on_speech_start(self) -> None:
         print("STT stream starting")
         while not self.transcript_queue.empty():
             self.transcript_queue.get_nowait()
-        try:
-            self.sarvam_ws   = await connect_sarvam_ws(self.language_code)
-            self.reader_task = asyncio.create_task(sarvam_reader(self.sarvam_ws, self.transcript_queue))
+        if await self.open_stt():
             await self.sarvam_ws.send(json.dumps({"event": "speech_start"}))
-        except Exception as e:
-            # STT unreachable must not kill the session — report and keep listening
-            print(f"Sarvam connect failed: {e}")
-            self.sarvam_ws, self.reader_task = None, None
+        else:
             await self.transport.send_json({"type": "error", "text": "Awaaz seva mein dikkat hai, dobara bolo."})
             await self.transport.send_json({"type": "ready"})
 
@@ -219,13 +233,23 @@ class Session:
         if self.active_turn and not self.active_turn.done():
             self.interrupt_event.set()
 
-    async def feed_audio(self, pcm: bytes) -> None:
-        if not pcm or self.sarvam_ws is None:
+    async def feed_audio_b64(self, payload: str) -> None:
+        """Carrier audio arrives already base64'd — don't round-trip it."""
+        if not payload or self.sarvam_ws is None:
             return
-        audio_b64 = base64.b64encode(pcm).decode()
-        await self.sarvam_ws.send(json.dumps({"event": "audio_input", "audio": audio_b64}))
+        await self.sarvam_ws.send(json.dumps({"event": "audio_input", "audio": payload}))
 
-    async def start_turn(self, transcript: str, tts_lang: str = "") -> None:
+    async def feed_audio(self, pcm: bytes) -> None:
+        if not pcm:
+            return
+        await self.feed_audio_b64(base64.b64encode(pcm).decode())
+
+    async def greet(self) -> None:
+        """Agent speaks first, so a caller hears a greeting instead of silence.
+        The persona prompt already says to introduce itself."""
+        await self.start_turn("", greeting=True)
+
+    async def start_turn(self, transcript: str, tts_lang: str = "", greeting: bool = False) -> None:
         """Cancel any in-flight turn, then run this one in the background."""
         if self.active_turn and not self.active_turn.done():
             self.interrupt_event.set()
@@ -234,25 +258,27 @@ class Session:
             except (asyncio.CancelledError, Exception): pass
 
         self.interrupt_event.clear()
-        self.active_turn = asyncio.create_task(self.run_turn(transcript, tts_lang))
+        self.active_turn = asyncio.create_task(self.run_turn(transcript, tts_lang, greeting))
         self.active_turn.add_done_callback(_on_turn_done)
 
-    async def run_turn(self, transcript: str, tts_lang: str = "") -> None:
-        if not transcript.strip():
+    async def run_turn(self, transcript: str, tts_lang: str = "", greeting: bool = False) -> None:
+        if not greeting and not transcript.strip():
             await self.transport.send_json({"type": "error", "text": "Samajh nahi aaya, dobara bolo."})
             await self.transport.send_json({"type": "ready"})
             return
 
-        print(f"[USER] {transcript}")
-        await self.transport.send_json({"type": "user_transcript", "text": transcript})
         turn_start = len(self.history)
-        self.history.append({"role": "user", "content": transcript})
+        if not greeting:
+            print(f"[USER] {transcript}")
+            await self.transport.send_json({"type": "user_transcript", "text": transcript})
+            self.history.append({"role": "user", "content": transcript})
 
         sentence_queue: asyncio.Queue = asyncio.Queue(maxsize=5)
         results = await asyncio.gather(
             stream_llm_producer(self.history, sentence_queue, self.interrupt_event,
                                 self.active_tools, self.account, self.transport, self.exec_tool),
-            tts_consumer(sentence_queue, self.transport, self.voice_id, self.interrupt_event, tts_lang),
+            tts_consumer(sentence_queue, self.transport, self.voice_id, self.interrupt_event,
+                         tts_lang, self.tts_format),
             return_exceptions=True,
         )
         full_text  = results[0] if isinstance(results[0], str) else ""
@@ -466,7 +492,7 @@ async def stream_llm_producer(history: list, queue: asyncio.Queue, interrupt: as
 
 
 async def tts_consumer(queue: asyncio.Queue, transport, vid: str, interrupt: asyncio.Event,
-                       lang_code: str = "") -> bool:
+                       lang_code: str = "", output_format: str = "") -> bool:
     vid = vid or ELEVENLABS_VOICE_ID
     tts_body = {
         "model_id": ELEVENLABS_MODEL,
@@ -497,6 +523,7 @@ async def tts_consumer(queue: asyncio.Queue, transport, vid: str, interrupt: asy
                         "xi-api-key": ELEVENLABS_API_KEY,
                         "Content-Type": "application/json",
                     },
+                    params={"output_format": output_format} if output_format else None,
                     json={"text": sentence, **tts_body},
                 ) as resp:
                     resp.raise_for_status()
@@ -514,3 +541,141 @@ async def tts_consumer(queue: asyncio.Queue, transport, vid: str, interrupt: asy
         except Exception as e:
             print(f"TTS error for '{sentence[:30]}': {e}")
     return audio_sent
+
+
+# ---------------------------------------------------------------- phone leg
+# VoiceLink's media-stream protocol mirrors Twilio's: JSON text frames with
+# base64 A-law payloads. Docs: app.voicelink.co.in/documentation/
+
+class PhoneTransport:
+    """Looks like a WebSocket to run_turn/tts_consumer, speaks VoiceLink."""
+
+    SEGMENT = 8000   # 1s of 8kHz A-law; VoiceLink wants segments under 2s
+
+    def __init__(self, ws: WebSocket):
+        self.ws         = ws
+        self.stream_sid = None
+        self.call_sid   = None
+
+    async def send_json(self, msg: dict) -> None:
+        kind = msg.get("type")
+        if kind == "interrupted":
+            await self.clear()
+        elif kind == "tool_call":
+            print(f"[phone] tool {msg.get('name')} -> {str(msg.get('result'))[:80]}")
+        elif kind in ("user_transcript", "agent_transcript", "error"):
+            print(f"[phone] {kind}: {str(msg.get('text'))[:100]}")
+
+    async def send_bytes(self, audio: bytes) -> None:
+        # shortcut: unpaced, as Twilio accepts — the carrier buffers and plays at
+        # 8kHz. If VoiceLink needs paced frames, meter this to 1s of audio/second.
+        for i in range(0, len(audio), self.SEGMENT):
+            await self.ws.send_json({
+                "event": "media",
+                "media": {"payload": base64.b64encode(audio[i:i + self.SEGMENT]).decode()},
+            })
+
+    async def clear(self) -> None:
+        """Drop audio already queued at the carrier — the half of barge-in that
+        setting interrupt_event cannot reach."""
+        if self.stream_sid:
+            await self.ws.send_json({"event": "clear", "stream_sid": self.stream_sid})
+
+    async def transfer(self, target: str) -> None:
+        await self.ws.send_json({"event": "transfer", "target": target})
+
+
+@app.post("/voicelink/inbound")
+async def voicelink_inbound(req: Request):
+    """VoiceLink asks us, per inbound call, where to stream it. Both keys required."""
+    data = await req.json()
+    print(f"[phone] inbound call={data.get('callId')} sid={data.get('sid')} "
+          f"from={data.get('customerNumber')} did={data.get('callerId')}")
+    if not PUBLIC_BASE_URL:
+        print("[phone] PUBLIC_BASE_URL unset — VoiceLink cannot reach us")
+    ws_base = PUBLIC_BASE_URL.replace("https://", "wss://").replace("http://", "ws://")
+    call_id = data.get("callId") or data.get("sid") or ""
+    return {
+        "ws_url":      f"{ws_base}/ws/phone?call_id={call_id}",
+        "webhook_url": f"{PUBLIC_BASE_URL}/voicelink/webhook",
+    }
+
+
+@app.post("/voicelink/webhook")
+async def voicelink_webhook(req: Request):
+    """Call lifecycle. VoiceLink documents two payload shapes; log both spellings."""
+    data = await req.json()
+    print(f"[phone] webhook {data.get('event') or 'status'} call={data.get('callId')} "
+          f"status={data.get('callStatus')} "
+          f"dur={data.get('duration') or data.get('durationSeconds')} "
+          f"by={data.get('disconnectedBy')} rec={data.get('recordingUrl')}")
+    return {"ok": True}
+
+
+@app.websocket("/ws/phone")
+async def phone_endpoint(ws: WebSocket):
+    await ws.accept()
+    print(f"[phone] stream open call_id={ws.query_params.get('call_id', '')}")
+
+    transport = PhoneTransport(ws)
+    session   = Session(transport)
+    session.tts_format = "alaw_8000"
+    await session.apply_settings({"tools": "telecom",
+                                  "system_prompt": telecom_tools.SYSTEM_PROMPT})
+
+    async def on_vad(event: str) -> None:
+        # Caller started talking. If the agent is mid-answer that is a barge-in:
+        # stop generating AND drop what the carrier already buffered.
+        if event == "vad.speech_start" and session.active_turn and not session.active_turn.done():
+            print("[phone] barge-in")
+            await session.on_interrupt()
+            await transport.clear()
+
+    async def drive_turns() -> None:
+        """Sarvam owns the turn boundaries here, so transcripts drive the loop."""
+        while True:
+            text, lang = await session.transcript_queue.get()
+            if text.strip():
+                await session.start_turn(text, lang)
+
+    stt_ok = await session.open_stt(on_vad=on_vad, endpointing="vad",
+                                   encoding="alaw", sample_rate=8000)
+    if not stt_ok:
+        print("[phone] no STT — caller will hear the greeting and nothing after")
+    driver = asyncio.create_task(drive_turns()) if stt_ok else None
+
+    try:
+        while True:
+            raw = await ws.receive_text()
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                print(f"[phone] dropped non-JSON frame: {raw[:80]}")
+                continue
+
+            event = msg.get("event")
+            if event == "media":
+                await session.feed_audio_b64(msg.get("media", {}).get("payload", ""))
+            elif event == "start":
+                start = msg.get("start", {})
+                # casing differs across their events: stream_sid/call_sid vs callSid
+                transport.stream_sid = start.get("stream_sid") or msg.get("stream_sid")
+                transport.call_sid   = start.get("call_sid")
+                print(f"[phone] start call={transport.call_sid} from={start.get('from')} "
+                      f"to={start.get('to')} fmt={start.get('media_format')}")
+                await session.greet()
+            elif event == "stop":
+                print(f"[phone] stop call={msg.get('stop', {}).get('callSid')}")
+                break
+            elif event == "connected":
+                print("[phone] connected")
+            elif event == "mark":
+                print(f"[phone] mark {msg.get('mark', {}).get('name')}")
+    except WebSocketDisconnect:
+        print("[phone] carrier disconnected")
+    except Exception as e:
+        print(f"[phone] error: {e}")
+    finally:
+        if driver:
+            driver.cancel()
+        await session.close()

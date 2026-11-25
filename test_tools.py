@@ -194,4 +194,50 @@ assert _drain([{"event": "session.begin", "request_id": "x", "config": {}},
                {"event": "pong"}]) == []
 
 
+# --- PhoneTransport: VoiceLink envelope (no network) ---
+import base64
+
+
+class _FakeCarrierWS:
+    def __init__(self):
+        self.sent = []
+    async def send_json(self, m):
+        self.sent.append(m)
+
+
+def _tp(stream_sid=None):
+    t = main.PhoneTransport(_FakeCarrierWS())
+    t.stream_sid = stream_sid
+    return t
+
+# audio is split into sub-2s media frames, base64, nothing lost
+t = _tp("stream_x")
+asyncio.run(t.send_bytes(b"\xd5" * 20000))           # 2.5s of 8kHz alaw
+assert len(t.ws.sent) == 3                            # 8000 + 8000 + 4000
+assert all(e["event"] == "media" for e in t.ws.sent)
+assert base64.b64decode(t.ws.sent[0]["media"]["payload"]) == b"\xd5" * 8000
+assert sum(len(base64.b64decode(e["media"]["payload"])) for e in t.ws.sent) == 20000
+
+# an interrupt must reach the carrier — stopping generation alone leaves
+# seconds of the old answer already buffered there
+t = _tp("stream_y")
+asyncio.run(t.send_json({"type": "interrupted"}))
+assert t.ws.sent == [{"event": "clear", "stream_sid": "stream_y"}]
+
+# before `start` arrives there is no stream to clear: no crash, nothing sent
+t = _tp()
+asyncio.run(t.send_json({"type": "interrupted"}))
+assert t.ws.sent == []
+
+# browser-only chatter is logged, never forwarded to the carrier
+t = _tp("s")
+for m in ({"type": "tts_end"}, {"type": "user_transcript", "text": "hi"},
+          {"type": "settings_ack"}, {"type": "ready"}):
+    asyncio.run(t.send_json(m))
+assert t.ws.sent == []
+
+asyncio.run(t.transfer("9812304567"))
+assert t.ws.sent == [{"event": "transfer", "target": "9812304567"}]
+
+
 print("all checks passed")
